@@ -151,9 +151,15 @@ fi
 
 say ""
 say "== 3/5 构建报告 / 配置快照 =="
+# A1 的扫描面基线（results-fbdescribe-*）整目录导出：里面有 ioreg-IOFramebuffer.plist
+# 与 displays.txt，只搬 summary.txt 会丢掉原始证据。
+for d in "$BUNDLE"/results-fbdescribe-*; do
+  [ -d "$d" ] || continue
+  copy_tree "$d" "fbdescribe/$(basename "$d")"
+done
 for d in "$BUNDLE"/results-*; do
   [ -d "$d" ] || continue
-  case "$(basename "$d")" in results-collect-*) continue ;; esac
+  case "$(basename "$d")" in results-collect-*) continue ;; results-fbdescribe-*) continue ;; esac
   for f in report.md summary.txt; do
     [ -f "$d/$f" ] && copy_file "$d/$f" "build/$(basename "$d")/$f"
   done

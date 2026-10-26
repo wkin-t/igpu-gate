@@ -157,7 +157,7 @@ run_kc() {  # run_kc <kc 路径> <required|info>
       say "   ${_name}：INVALID（无法判定：导出表不可读或输入不合法）"
       if [ "$_role" = "required" ]; then TARGET_STATE=invalid; RESULT=1; else SYS_STATE=invalid; fi ;;
     *)
-      say "   ${_name}：UNKNOWN（门禁异常 rc=$RC）"
+      say "   ${_name}：UNKNOWN（门禁异常 rc=${RC}）"
       if [ "$_role" = "required" ]; then TARGET_STATE=unknown; RESULT=1; else SYS_STATE=unknown; fi ;;
   esac
   CHECKED=$((CHECKED + 1))

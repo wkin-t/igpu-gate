@@ -15,7 +15,7 @@
 //                   且 `kmutil showloaded` 能列出 dev.igpu.loadprobe
 //   依赖不满足    → 没有 kern_start 行，日志/OC 日志里出现未解析依赖或 load failed
 //   根本没注入    → 两者都没有，且 ESP 上没有本 kext
-#include <IOKit/IOLib.h>
+#include <mach/kmod.h>\n#include <IOKit/IOLib.h>
 #include <IOKit/IOService.h>
 #include <IOKit/graphics/IOFramebuffer.h>
 
@@ -71,7 +71,7 @@ IODeviceMemory * IGPULoadProbe::getApertureRange(IOPixelAperture aperture)
 
 const char * IGPULoadProbe::getPixelFormats(void)
 {
-    return "----";     // 空像素格式集：明确表示"不支持任何格式"
+    return "";   // 空像素格式集 = 空串（NUL 分隔串里 "----" 是一个 4bpp 的 don't-care 格式，不是空集）
 }
 
 IOItemCount IGPULoadProbe::getDisplayModeCount(void)

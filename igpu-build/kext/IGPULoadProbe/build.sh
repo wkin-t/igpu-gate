@@ -20,7 +20,7 @@ echo "[1/4] 编译（arch=${ARCH}）"
 mkdir -p "$OUT" "$KEXT/Contents/MacOS"
 cd "$HERE"
 xcrun clang++ -std=c++17 -arch "${ARCH}" -mkernel -fapple-kext -fno-exceptions -fno-rtti \
-  -nostdinc++ -O2 -Wall -Wextra -DKERNEL=1 \
+  -nostdinc++ -O2 -Wall -Wextra -DKERNEL=1 -mmacosx-version-min=11.0 \
   -isysroot "$SDK" \
   -I"$HERE/compat-include" \
   -I"$SDK/System/Library/Frameworks/Kernel.framework/Headers" \
@@ -49,14 +49,34 @@ if ! nm -arch "${ARCH}" -gU "$KEXT/Contents/MacOS/IGPULoadProbe" 2>/dev/null \
 fi
 echo "  _kmod_info 已定义 ✓"
 
-# 4b：必须存在来自 IOFramebuffer/IOGraphicsFamily 的未定义符号（A0 的被测对象）
-UNDEF="$(nm -arch "${ARCH}" -u "$KEXT/Contents/MacOS/IGPULoadProbe" 2>/dev/null | grep -c 'IOFramebuffer' || true)"
-if [ "${UNDEF:-0}" -lt 1 ]; then
-  echo "[FAIL] 二进制里没有对 IOFramebuffer 的未定义引用 —— 链接把它优化掉了，A0 失去意义" >&2
-  nm -arch "${ARCH}" -u "$KEXT/Contents/MacOS/IGPULoadProbe" 2>&1 | head -20 >&2
+# 4b：断言**具体**的 IOFramebuffer 符号是未定义的。
+# 旧版用 `grep -c IOFramebuffer >= 1`：任何子类都必然引用 ctor/vtable/gMetaClass，
+# 这条断言结构上恒真（假绿），回答不了"Boot KC 能不能解析"这个问题。
+# 现在要求三类符号同时出现，任何一个缺失都说明链接方式变了。
+if ! nm -arch "${ARCH}" -u "$KEXT/Contents/MacOS/IGPULoadProbe" > "$OUT/undef.txt" 2>/dev/null; then
+  echo "[FAIL] nm -u 失败（CLT 缺失？）" >&2
   exit 8
 fi
-echo "  IOFramebuffer 未定义引用：${UNDEF} 个 ✓（A0 的被测依赖存在）"
+MISS=""
+for sym in "__ZTV13IOFramebuffer" "gMetaClass" "getPixelInformation"; do
+  if ! grep -q "$sym" "$OUT/undef.txt"; then MISS="${MISS} ${sym}"; fi
+done
+if [ -n "${MISS}" ]; then
+  echo "[FAIL] 缺少预期的未定义符号：${MISS}" >&2
+  echo "       这说明链接方式变了，A0 的被测对象不再成立" >&2
+  head -20 "$OUT/undef.txt" >&2
+  exit 8
+fi
+UNDEF=$(grep -c 'IOFramebuffer' "$OUT/undef.txt" || true)
+echo "  IOFramebuffer 未定义符号：${UNDEF} 个（含 vtable/gMetaClass/方法）✓"
+
+# 4c：不允许出现编译器 libcall（-nostdlib 下没有 -lcc_kext 兜底）
+if grep -qE '__memcpy|__memset|__udivdi3|__divdi3|__cxa_pure_virtual' "$OUT/undef.txt"; then
+  echo "[FAIL] 出现 libcall/纯虚符号，说明 -nostdlib 不再安全（需要 -lcc_kext 或改代码）" >&2
+  grep -E '__memcpy|__memset|__udivdi3|__divdi3|__cxa_pure_virtual' "$OUT/undef.txt" >&2
+  exit 9
+fi
+echo "  libcall 门禁 ✓（无 memcpy/memset/divdi3/纯虚）"
 
 echo
 echo "产物：$KEXT"
