@@ -86,3 +86,72 @@ jobs:
           retention-days: 7
           path: |
             testkit/harness/last-*.log
+
+  # 用 GitHub 的 macOS runner 代替 Mac mini 编译 A0 kext，并把产物作为 artifact 提供下载。
+  # Mac mini 原来的职责：编译 / kextutil / 真 bash 回归 —— 前两项这里都有；
+  # 只有"对目标机 KC 做符号核验"必须在真机跑（onsite/05-kcgate.sh）。
+  build-loadprobe:
+    runs-on: macos-26
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: 环境（确认有 Xcode/CLT 与 SDK）
+        shell: bash
+        run: |
+          sw_vers
+          echo "arch: $(uname -m)"
+          xcrun clang++ --version | head -2
+          echo "sdk: $(xcrun --sdk macosx --show-sdk-version)"
+
+      - name: 构建 IGPULoadProbe（x86_64 交叉编译）
+        shell: bash
+        working-directory: igpu-build/kext/IGPULoadProbe
+        run: |
+          set -e
+          chmod +x build.sh
+          ARCH=x86_64 ./build.sh 2>&1 | tee /tmp/loadprobe-build.log
+
+      - name: 静态门禁（架构 / _kmod_info / IOFramebuffer 未定义引用）
+        shell: bash
+        run: |
+          set -e
+          BIN=igpu-build/kext/IGPULoadProbe/IGPULoadProbe.kext/Contents/MacOS/IGPULoadProbe
+          file "$BIN"
+          file "$BIN" | grep -q 'Mach-O 64-bit kext bundle x86_64' \
+            || { echo "::error::产物不是 x86_64 kext bundle"; exit 1; }
+
+          echo "--- _kmod_info 必须是已定义的外部符号 ---"
+          nm -arch x86_64 -gU "$BIN" \
+            | awk 'NF>=3 && $3=="_kmod_info" && $2 ~ /^[A-Za-z]$/ {f=1} END{exit f?0:1}' \
+            || { echo "::error::缺 _kmod_info（OC 会报 Invalid Parameter）"; exit 1; }
+
+          echo "--- A0 的被测依赖：必须存在对 IOFramebuffer 的未定义引用 ---"
+          N=$(nm -arch x86_64 -u "$BIN" | grep -c IOFramebuffer || true)
+          echo "undef IOFramebuffer = ${N}"
+          [ "${N}" -ge 1 ] || { echo "::error::没有 IOFramebuffer 未定义引用，A0 失去意义"; exit 1; }
+
+          echo "--- Info.plist 的依赖声明 ---"
+          plutil -extract OSBundleLibraries xml1 -o - \
+            igpu-build/kext/IGPULoadProbe/IGPULoadProbe.kext/Contents/Info.plist
+
+          echo "--- 产物哈希 ---"
+          shasum -a 256 "$BIN"
+
+      - name: 打包 kext（下载后可直接拷进 ESP）
+        shell: bash
+        run: |
+          set -e
+          cd igpu-build/kext/IGPULoadProbe
+          ditto -c -k --sequesterRsrc --keepParent IGPULoadProbe.kext /tmp/IGPULoadProbe.kext.zip
+          ls -l /tmp/IGPULoadProbe.kext.zip
+          shasum -a 256 /tmp/IGPULoadProbe.kext.zip
+
+      - name: 上传产物
+        uses: actions/upload-artifact@v7
+        with:
+          name: IGPULoadProbe-kext
+          retention-days: 30
+          path: |
+            /tmp/IGPULoadProbe.kext.zip
+            /tmp/loadprobe-build.log
