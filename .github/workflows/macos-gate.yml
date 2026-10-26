@@ -24,7 +24,7 @@ jobs:
     runs-on: macos-26
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: 环境自述（证明是真 macOS + 真 bash 3.2）
         shell: bash
@@ -79,7 +79,7 @@ jobs:
 
       - name: 失败诊断日志（只传测试日志，不传整目录）
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: harness-logs
           if-no-files-found: ignore
