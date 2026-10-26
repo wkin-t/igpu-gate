@@ -93,6 +93,11 @@ EOS
 mkdir -p "$2" && { echo "sip: enabled"; echo "boot_kc: stub"; } > "$2/INDEX.txt"
 exit "${FAKE_INVENTORY_RC:-0}"
 EOS
+  cat > "${K}/onsite/16-coding-readiness.sh" <<'EOS'
+#!/bin/sh
+echo "RESULT: NOT-READY（stub）"
+exit 1
+EOS
   chmod +x "${K}"/onsite/*.sh
 
   # --- 系统命令桩 ---
@@ -166,6 +171,7 @@ chk "阶段3 退出码" "$r" "0"; chk "阶段3→4" "$(phase)" "4"
 if grep -q '全部完成' "${T}/out.txt"; then ok "阶段3 打印完成"; else no "阶段3 打印完成"; fi
 if ls -d "${K}"/results-fbdescribe-* >/dev/null 2>&1; then ok "A1 落在 bundle 下"; else no "A1 落在 bundle 下"; fi
 if ls -d "${K}"/results-pre2b-* >/dev/null 2>&1; then ok "2b 前置证据包落在 bundle 下"; else no "2b 前置证据包落在 bundle 下"; fi
+if grep -q '编码启动门' "${T}/out.txt"; then ok "阶段3 打印编码启动门"; else no "阶段3 打印编码启动门"; fi
 if ls "${HO}"/igpu-collect-*.tar.gz >/dev/null 2>&1; then ok "导出兜底 tar 生成"; else no "导出兜底 tar 生成"; fi
 if grep -q 'A0 判定' "${T}/out.txt"; then ok "阶段0 打印 A0 判定"; else no "阶段0 打印 A0 判定"; fi
 cleanup

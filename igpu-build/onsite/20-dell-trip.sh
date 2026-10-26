@@ -154,7 +154,7 @@ run_collect() {   # $1 = 阶段号, $2 = 轮次描述
 
 preflight() {
   MISSING=""
-  for f in 02-collect.sh 04-state.sh 05-kcgate.sh 01-deploy.sh 09-grab.sh 13-fb-describe.sh 14-a0-gate.sh 15-pre2b-inventory.sh; do
+  for f in 02-collect.sh 04-state.sh 05-kcgate.sh 01-deploy.sh 09-grab.sh 13-fb-describe.sh 14-a0-gate.sh 15-pre2b-inventory.sh 16-coding-readiness.sh; do
     [ -f "${HERE}/${f}" ] || MISSING="${MISSING} onsite/${f}"
   done
   [ -f "${BUNDLE}/tools/add-kext-entry.py" ] || MISSING="${MISSING} tools/add-kext-entry.py"
@@ -362,6 +362,14 @@ if [ "${PHASE}" -eq 3 ]; then
       die 3 "本次启动不是 normal 模式（kern.bootargs=${NOWARGS}）。回阶段 2 的说明切回 normal 再重启" ;;
   esac
   run_collect 3 "第 3 轮 normal（冷启）"
+
+  say ""
+  say "-- 编码启动门（G1–G4，用本次证据判定）--"
+  if sh "${HERE}/16-coding-readiness.sh"; then
+    both "  编码启动门：全部通过"
+  else
+    soft "编码启动门有未过项（见上表；不影响数据交付）"
+  fi
 
   say ""
   say "-- 导出 --"
