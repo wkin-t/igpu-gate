@@ -57,10 +57,14 @@ if ! nm -arch "${ARCH}" -u "$KEXT/Contents/MacOS/IGPULoadProbe" > "$OUT/undef.tx
   echo "[FAIL] nm -u 失败（CLT 缺失？）" >&2
   exit 8
 fi
+# 只断言**结构性**符号：vtable 与 gMetaClass 是任何子类都必须引用的；
+# 不能断言具体方法（如 getPixelInformation）——那些是我们自己实现的，本来就不是未定义。
 MISS=""
-for sym in "__ZTV13IOFramebuffer" "gMetaClass" "getPixelInformation"; do
+for sym in "__ZTV13IOFramebuffer" "__ZN13IOFramebuffer10gMetaClassE"; do
   if ! grep -q "$sym" "$OUT/undef.txt"; then MISS="${MISS} ${sym}"; fi
 done
+UNDEF_N=$(grep -c 'IOFramebuffer' "$OUT/undef.txt" || true)
+[ "${UNDEF_N:-0}" -ge 10 ] || MISS="${MISS} (IOFramebuffer 未定义符号只有 ${UNDEF_N} 个，远少于基类方法数)"
 if [ -n "${MISS}" ]; then
   echo "[FAIL] 缺少预期的未定义符号：${MISS}" >&2
   echo "       这说明链接方式变了，A0 的被测对象不再成立" >&2
