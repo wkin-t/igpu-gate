@@ -21,7 +21,7 @@ if [ -z "$STD" ]; then
   echo "FAIL 找不到可用的 C++ 标准（试过 c++17/14/11）" >&2
   exit 2
 fi
-echo "[1/3] 编译器：$("$CXX" --version 2>&1 | head -1)（标准 $STD）"
+echo "[1/3] 编译器：$("$CXX" --version 2>&1 | head -1)（标准 ${STD}）"
 
 echo "[2/3] 编译模型 + 单测"
 "$CXX" -std="$STD" -O2 -Wall -Wextra -Werror -I"$HERE" \

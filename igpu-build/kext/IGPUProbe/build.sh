@@ -46,7 +46,7 @@ cd "$HERE"
 #   PCIDriverKit 的用户态类体（OSClassLoadInformation、New/Dispatch override）拉进来，
 #   编译必然报 "unknown type name 'OSClassLoadInformation'"。
 # -I"$HERE/compat-include"：macOS 26/27 SDK 已无独立 IOMemoryMap.h，需要一层零内容转发头。
-# 注：`${ARCH}` 的花括号是必需的——bash 3.2 + C.UTF-8 下 `$ARCH）` 会把全角括号的字节并进变量名，
+# 注：`${ARCH}` 的花括号是必需的——bash 3.2 + C.UTF-8 下 `$ARCH` 后接全角括号（会把字节的字节并进变量名，
 #   `set -u` 判 unbound（这个坑在 macOS 侧实测踩到过）。
 xcrun clang++ -std=c++17 -arch "$ARCH" -mkernel -fapple-kext -fno-exceptions -fno-rtti \
   -nostdinc++ -O2 -Wall -Wextra -DKERNEL=1 \

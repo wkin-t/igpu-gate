@@ -59,7 +59,7 @@ log "R1-R8 全过"
 
 log ""
 log "--- 3b) shell 变量花括号检查 ---"
-# bash 3.2（macOS /bin/sh）+ 中文相邻时，`$VAR（` 会把全角括号的首字节并进变量名，
+# bash 3.2（macOS /bin/sh）+ 中文相邻时，`$VAR` 后接全角括号（会把首字节的首字节并进变量名，
 # set -u 下直接 "VAR?: unbound variable" 退出。这里提前拦下这类写法。
 if ! python3 - "$ROOT" >>"$REPORT" 2>&1 <<'PYEOF'
 import pathlib, re, sys

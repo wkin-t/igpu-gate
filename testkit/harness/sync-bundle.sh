@@ -13,7 +13,7 @@ SRC="$KIT/igpu-build"
 MAN="$SRC/SHA256SUMS"
 
 [ -d "$SRC" ] || { echo "sync-bundle: 找不到权威源码 $SRC" >&2; exit 1; }
-[ -f "$MAN" ] || { echo "sync-bundle: 缺 $MAN（未重封不能跑测试）" >&2; exit 1; }
+[ -f "$MAN" ] || { echo "sync-bundle: 缺 ${MAN}（未重封不能跑测试）" >&2; exit 1; }
 
 sha_of() {
   if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1" | awk '{print $1}'
@@ -32,7 +32,7 @@ copy() {  # copy <相对路径>
   want=$(awk -v r="$rel" '$2 == r { print $1; exit }' "$MAN")
   [ -n "$want" ] || { echo "sync-bundle: 源未登记进清单 $rel" >&2; exit 1; }
   got=$(sha_of "$SRC/$rel") || { echo "sync-bundle: 无 sha 工具" >&2; exit 1; }
-  [ "$got" = "$want" ] || { echo "sync-bundle: 源与清单不符 $rel（$got != $want）" >&2; exit 1; }
+  [ "$got" = "$want" ] || { echo "sync-bundle: 源与清单不符 ${rel}（${got} != ${want}）" >&2; exit 1; }
   mkdir -p "$(dirname "$B/$rel")"
   cp "$SRC/$rel" "$B/$rel" || { echo "sync-bundle: 复制失败 $rel" >&2; exit 1; }
   got=$(sha_of "$B/$rel") || exit 1
@@ -44,7 +44,7 @@ copy() {  # copy <相对路径>
 for f in 00-build.sh 01-deploy.sh 02-collect.sh 03-rollback.sh 04-state.sh 05-kcgate.sh 09-grab.sh 10-probe.sh 12-loadprobe-check.sh 13-fb-describe.sh 14-a0-gate.sh 15-pre2b-inventory.sh 16-coding-readiness.sh 20-dell-trip.sh; do
   copy "onsite/$f"
 done
-for f in set-bootargs.py inject-probe.py check-kext-source.py kc_gate.py kc_imports.py add-kext-entry.py fbmodel.py pre2b-decode.py; do
+for f in set-bootargs.py inject-probe.py check-kext-source.py kc_gate.py kc_imports.py add-kext-entry.py fbmodel.py pre2b-decode.py check-cjk-var.py; do
   copy "tools/$f"
 done
 copy "kext/IGPUProbe/IGPUProbe.cpp"
