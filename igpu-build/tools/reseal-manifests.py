@@ -35,7 +35,8 @@ TOP_EXCLUDE_PREFIXES = (
 )
 TOP_EXCLUDE_NAMES = {"report-macmini.txt", "SHA256SUMS"}
 TOP_EXCLUDE_GLOBS = ("testkit/harness/last-*.log",)
-BUILD_EXCLUDE_PREFIXES = ("kext/IGPUProbe/build/",)
+# 任何 kext 的本地构建目录都不该进清单：CI 上没有这些文件，会立刻对不上。
+BUILD_EXCLUDE_PREFIXES = ("kext/IGPUProbe/build/", "kext/IGPUModel/build/")
 BUILD_EXCLUDE_NAMES = {"SHA256SUMS"}
 
 
