@@ -44,7 +44,7 @@ copy() {  # copy <相对路径>
 for f in 00-build.sh 01-deploy.sh 02-collect.sh 03-rollback.sh 04-state.sh 05-kcgate.sh 09-grab.sh 10-probe.sh 12-loadprobe-check.sh 13-fb-describe.sh 14-a0-gate.sh 15-pre2b-inventory.sh 16-coding-readiness.sh 20-dell-trip.sh; do
   copy "onsite/$f"
 done
-for f in set-bootargs.py inject-probe.py check-kext-source.py kc_gate.py kc_imports.py add-kext-entry.py; do
+for f in set-bootargs.py inject-probe.py check-kext-source.py kc_gate.py kc_imports.py add-kext-entry.py fbmodel.py pre2b-decode.py; do
   copy "tools/$f"
 done
 copy "kext/IGPUProbe/IGPUProbe.cpp"

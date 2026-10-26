@@ -57,12 +57,12 @@ jobs:
           shasum -a 256 -c SHA256SUMS | tail -3
           echo "全部 OK"
 
-      - name: 六套仿真（真 bash 3.2）
+      - name: 七套仿真（真 bash 3.2，含 C++ 模型单测）
         shell: bash
         working-directory: testkit/harness
         run: |
           set -e
-          for f in run-state.sh run.sh run-collect.sh run-probe.sh run-kcgate.sh run-trip.sh; do
+          for f in run-state.sh run.sh run-collect.sh run-probe.sh run-kcgate.sh run-trip.sh run-model.sh; do
             echo "========== $f =========="
             bash "$f"
           done
@@ -72,7 +72,7 @@ jobs:
         working-directory: testkit
         run: |
           set -e
-          for f in cases.py cases2.py cases3.py; do
+          for f in cases.py cases2.py cases3.py cases4.py; do
             echo "========== $f =========="
             python3 "$f"
           done
