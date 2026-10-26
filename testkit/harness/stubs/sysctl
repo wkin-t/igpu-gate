@@ -1,0 +1,11 @@
+#!/bin/sh
+N=0
+if [ "$1" = "-n" ]; then N=1; shift; fi
+BOOT_DEFAULT='{ sec = 1760939400, usec = 0 } Mon Oct 20 05:50:00 2026'
+case "$1" in
+  kern.bootargs) VAL="-v keepsyms=1 debug=0x100 vsmcgen=1${FAKE_EXTRA_ARGS}" ;;
+  kern.safeboot) VAL="${FAKE_SAFEBOOT:-0}" ;;
+  kern.boottime) VAL=${FAKE_BOOTTIME:-$BOOT_DEFAULT} ;;
+  *) VAL="unknown" ;;
+esac
+if [ "$N" -eq 1 ]; then echo "$VAL"; else echo "$1: $VAL"; fi

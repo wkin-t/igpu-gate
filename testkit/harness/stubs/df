@@ -1,0 +1,6 @@
+#!/bin/sh
+# 探针用：正常给一行可用空间；FAKE_DF=unknown 时只给表头，模拟"空间不可判定"。
+echo "Filesystem 1024-blocks Used Available Capacity Mounted on"
+if [ "${FAKE_DF:-ok}" = "unknown" ]; then exit 0; fi
+echo "/dev/disk2s1 204800 1024 ${FAKE_DF_KB:-204800} 1% /Volumes/OCEFI"
+exit 0

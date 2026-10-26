@@ -1,0 +1,22 @@
+#!/bin/sh
+if [ "${FAKE_LOG_FAIL:-0}" = "1" ]; then echo "log: no entries" >&2; exit 1; fi
+case "$*" in
+  *"--last boot"*) if [ "${FAKE_LOG_BOOT_FAIL:-0}" = "1" ]; then echo "log: boot scope unavailable" >&2; exit 1; fi ;;
+esac
+case "$*" in
+  *IGPUProbe*)
+    n=${FAKE_LOG_EVENTS:-2}
+    i=0
+    while [ "$i" -lt "$n" ]; do
+      echo "2026-10-20 05:50:0$i.000 kernel[0]: IGPUProbe: register table published (${i})"
+      i=$((i+1))
+    done
+    ;;
+  *"shutdown cause"*)
+    echo "2026-10-20 05:50:00.000 kernel[0]: shutdown cause: 5"
+    ;;
+  *)
+    exit 0
+    ;;
+esac
+exit 0

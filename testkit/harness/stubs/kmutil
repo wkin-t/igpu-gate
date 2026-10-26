@@ -1,0 +1,9 @@
+#!/bin/sh
+if [ "$1" = "showloaded" ]; then
+  if [ "${FAKE_KM_PROBE:-yes}" = "yes" ]; then
+    echo "   70    0 0xffffff800420f000 0xa000     0xa000     dev.igpu.probe (0.1.0) B35B7604-8F3C-32CA-A9CF-23A10029FB81 <19 7 6 3 1>"
+  fi
+  echo "   71    1 0xffffff8004300000 0x1000     0x1000     com.apple.iokit.IOPCIFamily (2.9) ABC"
+  exit 0
+fi
+exit 0

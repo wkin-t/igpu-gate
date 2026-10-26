@@ -1,0 +1,88 @@
+# 在**真 macOS 26 + 真 bash 3.2** 下跑离线门禁。
+#
+# 为什么需要：本地仿真跑在 Windows 的 Git Bash（bash 5）上，
+# bash 3.2 的坑（中文邻接变量被吞、set -u 直接退出）只有真 macOS 才暴露。
+#
+# runs-on 说明：macos-26 = arm64 标准 runner（free/private 额度按平台规则计费）；
+# `macos-26-intel` 属 larger runner，需要付费套餐，一般用不到。
+name: macos-gate
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: macos-gate-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  gate:
+    runs-on: macos-26
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 环境自述（证明是真 macOS + 真 bash 3.2）
+        shell: bash
+        run: |
+          sw_vers
+          echo "arch: $(uname -m)"
+          echo "bash: $(bash --version | head -1)"
+          echo "python: $(python3 -V 2>&1)"
+          echo "shasum: $(command -v shasum || echo 缺失)"
+
+      - name: 可执行位自检（stubs 与 shim 必须是 100755，否则会落到真实系统命令）
+        shell: bash
+        run: |
+          set -e
+          test -x testkit/bin/python || { echo "::error::testkit/bin/python 不可执行（git mode 应为 100755）"; exit 1; }
+          for s in testkit/harness/stubs/*; do
+            test -x "$s" || { echo "::error::桩件不可执行：$s"; exit 1; }
+          done
+          echo "全部桩件可执行 ✓"
+
+      - name: 封存清单自检
+        shell: bash
+        run: |
+          set -e
+          echo "== igpu-build/SHA256SUMS =="
+          ( cd igpu-build && shasum -a 256 -c SHA256SUMS | tail -3 )
+          echo "== dist/SHA256SUMS =="
+          ( cd igpu-build/dist && shasum -a 256 -c SHA256SUMS | tail -2 )
+          echo "== 顶层 SHA256SUMS（脱敏镜像清单） =="
+          shasum -a 256 -c SHA256SUMS | tail -3
+          echo "全部 OK"
+
+      - name: 五套仿真（真 bash 3.2）
+        shell: bash
+        working-directory: testkit/harness
+        run: |
+          set -e
+          for f in run-state.sh run.sh run-collect.sh run-probe.sh run-kcgate.sh; do
+            echo "========== $f =========="
+            bash "$f"
+          done
+
+      - name: cases（Python）
+        shell: bash
+        working-directory: testkit
+        run: |
+          set -e
+          for f in cases.py cases2.py cases3.py; do
+            echo "========== $f =========="
+            python3 "$f"
+          done
+
+      - name: 失败诊断日志（只传测试日志，不传整目录）
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: harness-logs
+          if-no-files-found: ignore
+          retention-days: 7
+          path: |
+            testkit/harness/last-*.log

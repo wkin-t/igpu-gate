@@ -1,0 +1,4 @@
+#!/bin/sh
+while [ $# -gt 0 ] && [ "${1#-}" != "$1" ]; do shift; done
+[ $# -eq 2 ] || exit 1
+exec /bin/cp -R "$1" "$2"

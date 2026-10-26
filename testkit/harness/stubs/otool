@@ -1,0 +1,6 @@
+#!/bin/sh
+# 桩：默认无签名；FAKE_SIGNED=1 时输出 LC_CODE_SIGNATURE（用于 F11 用例）
+if [ "${FAKE_SIGNED:-0}" = "1" ]; then
+  echo "      cmd LC_CODE_SIGNATURE"
+fi
+exit 0

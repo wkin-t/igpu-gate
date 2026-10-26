@@ -1,0 +1,15 @@
+#!/bin/sh
+# 桩：默认总是成功；FAKE_PLUTIL_FAIL_AT=N 时在第 N 次调用失败（用于部署事务回滚测试）
+N="${FAKE_PLUTIL_FAIL_AT:-0}"
+if [ "$N" != "0" ]; then
+  C="${FAKE_PLUTIL_COUNTER:-/tmp/plutil.count}"
+  n=$(cat "$C" 2>/dev/null || echo 0)
+  n=$((n + 1))
+  printf '%s' "$n" > "$C"
+  if [ "$n" = "$N" ]; then
+    echo "forced plutil failure at call $n" >&2
+    exit 1
+  fi
+fi
+echo "$*: OK"
+exit 0

@@ -1,0 +1,2 @@
+#!/bin/sh
+echo "System Integrity Protection status: enabled."

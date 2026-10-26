@@ -1,0 +1,4 @@
+#!/bin/sh
+echo "ProductName:	macOS"
+echo "ProductVersion:	26.6.2"
+echo "BuildVersion:	25G83"

@@ -1,0 +1,20 @@
+# 运行时生成物（sync-bundle 每次重建，不入库）
+testkit/harness/bundle/
+testkit/harness/esp/
+testkit/harness/esp2/
+testkit/harness/espr/
+testkit/harness/localbk/
+testkit/harness/last-*.log
+testkit/harness/report-*.txt
+testkit/harness/probe-tmp*/
+testkit/harness/kcgate-tmp*/
+testkit/harness/plutil.cnt
+# 构建/采集/导出产物（可能含机器标识，绝不入库）
+igpu-build/results-*/
+igpu-build/evidence-export/
+igpu-build/.build-tmp/
+igpu-build/kext/IGPUProbe/build/
+report-macmini.txt
+**/__pycache__/
+*.pyc
+.DS_Store

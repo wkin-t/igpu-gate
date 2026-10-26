@@ -1,0 +1,13 @@
+#!/bin/sh
+# 兼容 shim：优先 python3（macOS / CI），回退 python（Windows 常见只有 python）。
+# 必须防止递归：如果解析回本 shim 自己，就跳过，否则 exec 自己会死循环。
+self_dir=$(cd "$(dirname "$0")" && pwd) || exit 127
+for c in python3 python; do
+  p=$(command -v "$c" 2>/dev/null) || continue
+  case "$p" in
+    "$self_dir"/*|"$0") continue ;;
+  esac
+  exec "$p" "$@"
+done
+echo "testkit/bin/python: 找不到可用的 python3 / python" >&2
+exit 127

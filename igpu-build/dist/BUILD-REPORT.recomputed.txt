@@ -1,0 +1,11 @@
+# 注意：本文件不是 macmini-run.sh 的产物。脚本生成的 BUILD-REPORT.txt 因 cwd bug
+# 导致 4 个字段为空（见 report-macmini.txt 的 stderr / 诊断）。此文件为在正确 cwd 下
+# 手工重算的同一组字段，内容可逐条复现（命令见交付说明），仅用于回填 EXPECTED_BIN_SHA。
+build_utc=2026-10-21T00:35:29Z
+host=arm64 27.0.1
+clang=Apple clang version 21.0.0 (clang-2100.3.34.2)
+sdk=27.0
+source_cpp_sha256=e653a64e584f894b2113f343ecfc8a2f5b166a9232f8ddb662c8e8343e052488
+source_hpp_sha256=0958fd21de2942560b217b30f19b90d783ead4fd923860d64e9fead209da35c7
+binary_sha256=2f0d35595c0d6c5e38d95ee4e5c9468ba647a0165b108f34df49336b2e928d84
+binary_bytes=79976

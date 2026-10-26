@@ -1,0 +1,6 @@
+#!/bin/sh
+if [ "${FAKE_NM_UNDEFINED:-0}" = "1" ]; then
+  echo "                 U _kmod_info"
+else
+  echo "0000000000002000 S _kmod_info"
+fi

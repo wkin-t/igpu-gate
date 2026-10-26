@@ -1,0 +1,13 @@
+# 本文件为 BUILD-REPORT 的**修正版**：macmini-run.sh 旧版的这 4 个字段用了相对路径，
+# 在 kit 根目录执行时读不到 igpu-build 下的文件，输出为空。脚本已修为绝对路径；
+# 这里按同一 run 的元数据 + 当前产物哈希回填，供部署白名单直接引用。
+# 原始（空字段）输出见 BUILD-REPORT.mac-original.txt；第三方回填见 BUILD-REPORT.recomputed.txt。
+build_utc=2026-10-21T00:35:29Z
+host=arm64 27.0.1
+clang=Apple clang version 21.0.0 (clang-2100.3.34.2)
+sdk=27.0
+source_cpp_sha256=e653a64e584f894b2113f343ecfc8a2f5b166a9232f8ddb662c8e8343e052488
+source_hpp_sha256=0958fd21de2942560b217b30f19b90d783ead4fd923860d64e9fead209da35c7
+binary_sha256=2f0d35595c0d6c5e38d95ee4e5c9468ba647a0165b108f34df49336b2e928d84
+binary_bytes=79976
+plist_sha256=0862cf11fa45926142908312cfa387fb13d29e3daebd4fcd4836841c4ac2c817

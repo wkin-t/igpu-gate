@@ -1,0 +1,8 @@
+build_utc=2026-10-21T00:35:29Z
+host=arm64 27.0.1
+clang=Apple clang version 21.0.0 (clang-2100.3.34.2)
+sdk=27.0
+source_cpp_sha256=
+source_hpp_sha256=
+binary_sha256=
+binary_bytes=

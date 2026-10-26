@@ -1,0 +1,20 @@
+#!/bin/sh
+# 统一桩：deploy/rollback 用 FAKE_ESP 当挂载点，collect 用 FAKE_MP
+MP="${FAKE_MP:-${FAKE_ESP:-}}"
+case "$1" in
+  list)
+    echo "   0:      GUID_partition_scheme                        *disk2"
+    echo "   1:                        EFI  EFI  OCEFI             disk2s1"
+    echo "   3:                APFS Volume Macintosh HD           disk2s3"
+    ;;
+  mount) exit 0 ;;
+  info)
+    echo "   Device Identifier:         disk2s1"
+    echo "   Volume Name:               OCEFI"
+   echo "   Read-Only Volume:          ${FAKE_RO:-No}"
+    echo "   Mount Point:               $MP"
+    echo "   Partition Offset:          1048576"
+    ;;
+  unmount) exit 0 ;;
+esac
+exit 0

@@ -1,0 +1,111 @@
+#!/bin/sh
+# 忠实桩：normal/verbose 发布 RegsRead/RegsSuspect + IGPUProbeState(190 个 4 字节 data) + RegsTable；
+# prep 走 publishPrep 的协议，**不发布** RegsRead/RegsSuspect/IGPUProbeState。
+# 这样采集器若把 prep 按普通计数判，必然失败（N11 的回归用例就靠这个忠实性）。
+all="$*"
+cnt=${FAKE_INSTANCES:-1}
+IDV=${FAKE_IDV:-Yes}
+GPU=${FAKE_GPUACCESS:-"none: MMIO reads only"}
+RRD=${FAKE_REGS_READ:-190}
+RSP=${FAKE_REGS_SUSPECT:-0}
+PERR=${FAKE_PROBE_ERROR:-}
+PREP=${FAKE_PREP_PROPS:-0}
+PMODE=${FAKE_PREP_MODE:-prep: read-only evidence}
+PEC=${FAKE_PREP_EVIDENCE:-Yes}
+PRC=${FAKE_PREP_READS:-24}
+STATE=${FAKE_STATE:-present}          # present|missing
+SKEYS=${FAKE_STATE_KEYS:-190}
+SLEN=${FAKE_STATE_LEN:-4}             # 3 = 错长度
+STYPE=${FAKE_STATE_TYPE:-data}        # string = 错类型
+RTABLE=${FAKE_REGS_TABLE:-190}
+PASSERT=${FAKE_PREP_ASSERT:-pass}     # pass|fail|missing
+
+bool_of() { [ "$1" = "Yes" ] && printf '<true/>' || printf '<false/>'; }
+
+emit_state_dict() {
+  i=0
+  while [ "$i" -lt "$SKEYS" ]; do
+    if [ "$STYPE" = "string" ]; then
+      printf '<key>r%d</key><string>00000000</string>' "$i"
+    elif [ "$SLEN" -eq 4 ]; then
+      printf '<key>r%d</key><data>AAAAAA==</data>' "$i"
+    else
+      printf '<key>r%d</key><data>AAAA</data>' "$i"
+    fi
+    i=$((i+1))
+  done
+}
+
+emit_assert() {
+  n=1
+  while [ "$n" -le 7 ]; do
+    if [ "$PASSERT" = "missing" ] && [ "$n" -eq 3 ]; then n=$((n+1)); continue; fi
+    if [ "$PASSERT" = "fail" ] && [ "$n" -eq 3 ]; then
+      printf '<key>A%d</key><string>fail:port-field-not-TC3</string>' "$n"
+    else
+      printf '<key>A%d</key><string>pass</string>' "$n"
+    fi
+    n=$((n+1))
+  done
+}
+
+plist_entry() {
+  printf '<dict><key>IOClass</key><string>IGPUProbe</string>'
+  printf '<key>PhysicalIdentityVerified</key>%s' "$(bool_of "$IDV")"
+  printf '<key>GPUAccess</key><string>%s</string>' "$GPU"
+  if [ "$PREP" = "1" ]; then
+    printf '<key>PrepMode</key><string>%s</string>' "$PMODE"
+    printf '<key>EvidenceComplete</key>%s' "$(bool_of "$PEC")"
+    printf '<key>PrepReadCount</key><integer>%s</integer>' "$PRC"
+    printf '<key>PrepAssert</key><dict>'; emit_assert; printf '</dict>'
+  else
+    printf '<key>RegsRead</key><integer>%s</integer>' "$RRD"
+    printf '<key>RegsSuspect</key><integer>%s</integer>' "$RSP"
+    [ -n "$PERR" ] && printf '<key>ProbeError</key><string>%s</string>' "$PERR"
+    printf '<key>RegsTable</key><integer>%s</integer>' "$RTABLE"
+    if [ "$STATE" = "present" ]; then
+      printf '<key>IGPUProbeState</key><dict>'; emit_state_dict; printf '</dict>'
+    fi
+  fi
+  printf '</dict>'
+}
+
+case "$all" in
+  *"-a"*)
+    printf '<?xml version="1.0" encoding="UTF-8"?>\n'
+    printf '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n'
+    printf '<plist version="1.0">\n<array>'
+    if [ "${FAKE_PROBE:-on}" = "on" ]; then
+      i=0
+      while [ "$i" -lt "$cnt" ]; do plist_entry; i=$((i+1)); done
+    fi
+    printf '</array>\n</plist>\n'
+    ;;
+  *"-c IGPUProbe"*)
+    if [ "${FAKE_PROBE:-on}" = "on" ]; then
+      i=0
+      while [ "$i" -lt "$cnt" ]; do
+        printf '+-o IGPUProbe  <class IGPUProbe, id 0x1000003a4, registered, matched, active, busy 0 (0 ms), retain 5>\n    {\n'
+        printf '      "IOClass" = "IGPUProbe"\n      "PhysicalIdentityVerified" = %s\n      "GPUAccess" = "%s"\n' "$IDV" "$GPU"
+        if [ "$PREP" = "1" ]; then
+          printf '      "PrepMode" = "%s"\n      "EvidenceComplete" = %s\n      "PrepReadCount" = %s\n' "$PMODE" "$PEC" "$PRC"
+        else
+          printf '      "RegsRead" = %s\n      "RegsSuspect" = %s\n      "RegsTable" = %s\n' "$RRD" "$RSP" "$RTABLE"
+          [ -n "$PERR" ] && printf '      "ProbeError" = "%s"\n' "$PERR"
+          printf '      "IGPUProbeState" = {"r0"=<00000000>}\n'
+        fi
+        printf '    }\n\n'
+        i=$((i+1))
+      done
+    fi
+    ;;
+  *)
+    printf '+-o Root  <class IORoot>\n'
+    i=0
+    while [ "$i" -lt 40 ]; do
+      printf '    +-o IOPCIDevice  <class IOPCIDevice, registered>\n      {"IOClass"="IOPCIDevice","IOName"="pci8086,4680","reg"=<00000000>}\n'
+      i=$((i+1))
+    done
+    ;;
+esac
+exit 0
