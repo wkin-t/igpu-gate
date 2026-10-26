@@ -153,6 +153,11 @@ say ""
 say "== 3/5 构建报告 / 配置快照 =="
 # A1 的扫描面基线（results-fbdescribe-*）整目录导出：里面有 ioreg-IOFramebuffer.plist
 # 与 displays.txt，只搬 summary.txt 会丢掉原始证据。
+# 2b 前置证据包：整目录导出（KC 归属、SIP、PCI BAR、EDID、电源基线…）
+for d in "$BUNDLE"/results-pre2b-*; do
+  [ -d "$d" ] || continue
+  copy_tree "$d" "pre2b/$(basename "$d")"
+done
 for d in "$BUNDLE"/results-fbdescribe-*; do
   [ -d "$d" ] || continue
   copy_tree "$d" "fbdescribe/$(basename "$d")"

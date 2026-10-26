@@ -154,7 +154,7 @@ run_collect() {   # $1 = 阶段号, $2 = 轮次描述
 
 preflight() {
   MISSING=""
-  for f in 02-collect.sh 04-state.sh 05-kcgate.sh 01-deploy.sh 09-grab.sh 13-fb-describe.sh 14-a0-gate.sh; do
+  for f in 02-collect.sh 04-state.sh 05-kcgate.sh 01-deploy.sh 09-grab.sh 13-fb-describe.sh 14-a0-gate.sh 15-pre2b-inventory.sh; do
     [ -f "${HERE}/${f}" ] || MISSING="${MISSING} onsite/${f}"
   done
   [ -f "${BUNDLE}/tools/add-kext-entry.py" ] || MISSING="${MISSING} tools/add-kext-entry.py"
@@ -296,6 +296,14 @@ if [ "${PHASE}" -eq 1 ]; then
     both "  A1 采集完成：${A1DIR}"
   else
     soft "A1 采集异常（不影响 2a）"
+  fi
+
+  say ""
+  say "-- 2b 前置证据包（只读，一次采完：KC 归属 / SIP / KDK / PCI BAR / EDID / 电源基线 / 崩溃通道）--"
+  if sh "${HERE}/15-pre2b-inventory.sh" --outdir "${BUNDLE}/results-pre2b-$(date -u '+%Y%m%dT%H%M%SZ')" >> "${LOG}" 2>&1; then
+    both "  pre2b 证据包完成"
+  else
+    soft "pre2b 证据包异常（不影响 2a）"
   fi
 
   say ""
