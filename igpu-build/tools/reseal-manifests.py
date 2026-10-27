@@ -32,6 +32,9 @@ TOP_EXCLUDE_PREFIXES = (
     "testkit/harness/fake-esp/",
     "testkit/harness/localbk/",
     "testkit/harness/tpl/.tmp/",
+    # 本地构建目录：CI 上没有这些文件，进清单必然对不上
+    "igpu-build/kext/IGPUProbe/build/",
+    "igpu-build/kext/IGPUModel/build/",
 )
 TOP_EXCLUDE_NAMES = {"report-macmini.txt", "SHA256SUMS"}
 TOP_EXCLUDE_GLOBS = ("testkit/harness/last-*.log",)
