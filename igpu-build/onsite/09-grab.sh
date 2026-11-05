@@ -183,6 +183,7 @@ say ""
 say "== 4/5 交付身份与门禁证据 =="
 # 模型文件：驱动要消费的结构化输入，和原始证据一起带走才不会出现"证据在、结论丢"
 [ -f "$BUNDLE/model.json" ] && copy_file "$BUNDLE/model.json" "model/model.json"
+[ -f "$BUNDLE/results-a0-gate.txt" ] && copy_file "$BUNDLE/results-a0-gate.txt" "model/results-a0-gate.txt"
 for f in "$BUNDLE/EXPECTED_BIN_SHA" "$BUNDLE/dist/SHA256SUMS"; do
   [ -f "$f" ] || { say "   ⚠ 缺少 ${f}（身份证据不完整）"; continue; }
   copy_file "$f" "dist/$(basename "$f")"

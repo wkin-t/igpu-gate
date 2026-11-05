@@ -44,6 +44,8 @@ case "${REAL_HOME}" in ""|*" "*) REAL_HOME=${HOME} ;; esac
 STATE="${REAL_HOME}/.igpu-trip-phase"
 BOOTF="${STATE}.boot"
 LOG="${REAL_HOME}/igpu-trip-log.txt"
+# A0 结果放 bundle：解码器 / 09-grab / 兜底打包都从 bundle 取，sudo 下的家目录不可靠
+A0F="${BUNDLE}/results-a0-gate.txt"
 
 say()  { printf '%s\n' "$1"; }
 log()  { printf '%s %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$1" >> "${LOG}" 2>/dev/null || true; }
@@ -202,22 +204,24 @@ export_results() {
   else
     warn "没检测到可写 U 盘"
   fi
-  # 兜底：两个包（glob 必须在目标目录内展开，BSD tar 的 -C 不能配合另一目录的 glob）
-  C_TGZ="${REAL_HOME}/igpu-collect-$(date '+%Y%m%d-%H%M').tar.gz"
-  F_TGZ="${REAL_HOME}/igpu-fbdescribe-$(date '+%Y%m%d-%H%M').tar.gz"
-  OK=1
-  if ls -d "${BUNDLE}"/results-collect-* >/dev/null 2>&1; then
-    ( cd "${BUNDLE}" && tar czf "${C_TGZ}" results-collect-* ) || OK=0
+  # 兜底：一个包装下全部证据。glob 必须在 bundle 内展开（BSD tar 的 -C 不能配合别处的 glob），
+  # 所以先把日志拷进 bundle，再在子 shell 里 cd 进去只收集实际存在的项。
+  TGZ="${REAL_HOME}/igpu-results-$(date '+%Y%m%d-%H%M').tar.gz"
+  cp "${LOG}" "${BUNDLE}/igpu-trip-log.txt" 2>/dev/null || true
+  ITEMS=$(cd "${BUNDLE}" && for i in results-collect-* results-fbdescribe-* results-pre2b-* \
+                                    results-a0-gate.txt model.json igpu-trip-log.txt; do
+            [ -e "${i}" ] && printf '%s\n' "${i}"
+          done)
+  if [ -z "${ITEMS}" ]; then
+    warn "bundle 里没有任何可打包的证据（${BUNDLE}）"
+    return 1
   fi
-  if ls -d "${BUNDLE}"/results-fbdescribe-* >/dev/null 2>&1; then
-    ( cd "${BUNDLE}" && tar czf "${F_TGZ}" results-fbdescribe-* ) || OK=0
-  fi
-  if [ "${OK}" -eq 1 ]; then
-    both "  已打包：${C_TGZ}"
-    both "          ${F_TGZ}（两个都带走）"
+  # shellcheck disable=SC2086
+  if ( cd "${BUNDLE}" && tar czf "${TGZ}" ${ITEMS} ); then
+    both "  已打包：${TGZ}（拷走这一个文件即可）"
     return 0
   fi
-  warn "打包失败；手工拷 ${BUNDLE}/results-collect-*、${BUNDLE}/results-fbdescribe-* 与 ${LOG}"
+  warn "打包失败；手工拷 ${BUNDLE} 下的 results-*、model.json 与 ${LOG}"
   return 1
 }
 
@@ -255,12 +259,12 @@ if [ "${PHASE}" -eq 0 ]; then
 
   say ""
   say "-- 0.3 A0 离线判定（只读，不改 ESP、不需重启）--"
-  if sh "${HERE}/14-a0-gate.sh" > "${REAL_HOME}/results-a0-gate.txt" 2>&1; then
-    R=$(sed -n 's/^RESULT: //p' "${REAL_HOME}/results-a0-gate.txt" | tail -1)
-    both "  A0 判定：${R:-无 RESULT 行（看 ${REAL_HOME}/results-a0-gate.txt）}"
+  if sh "${HERE}/14-a0-gate.sh" > "${A0F}" 2>&1; then
+    R=$(sed -n 's/^RESULT: //p' "${A0F}" | tail -1)
+    both "  A0 判定：${R:-无 RESULT 行（看 ${A0F}）}"
   else
-    R=$(sed -n 's/^RESULT: //p' "${REAL_HOME}/results-a0-gate.txt" 2>/dev/null | tail -1)
-    soft "A0 判定不完整（${R:-无 RESULT}）；不影响 2a，文件留在 ${REAL_HOME}/results-a0-gate.txt"
+    R=$(sed -n 's/^RESULT: //p' "${A0F}" 2>/dev/null | tail -1)
+    soft "A0 判定不完整（${R:-无 RESULT}）；不影响 2a，文件留在 ${A0F}"
   fi
 
   say ""
@@ -383,7 +387,7 @@ if [ "${PHASE}" -eq 3 ]; then
   say " 采集到的："
   for d in "${BUNDLE}"/results-collect-*; do [ -d "${d}" ] && say "   ${d}"; done
   for d in "${BUNDLE}"/results-fbdescribe-*; do [ -d "${d}" ] && say "   ${d}"; done
-  say " A0 判定：${REAL_HOME}/results-a0-gate.txt"
+  say " A0 判定：${A0F}"
   say " 日志：${LOG}"
   say ""
   say " 把这些带回来即可（U 盘导出或上面的 tar.gz 都行）。"

@@ -172,7 +172,13 @@ if grep -q '全部完成' "${T}/out.txt"; then ok "阶段3 打印完成"; else n
 if ls -d "${K}"/results-fbdescribe-* >/dev/null 2>&1; then ok "A1 落在 bundle 下"; else no "A1 落在 bundle 下"; fi
 if ls -d "${K}"/results-pre2b-* >/dev/null 2>&1; then ok "2b 前置证据包落在 bundle 下"; else no "2b 前置证据包落在 bundle 下"; fi
 if grep -q '编码启动门' "${T}/out.txt"; then ok "阶段3 打印编码启动门"; else no "阶段3 打印编码启动门"; fi
-if ls "${HO}"/igpu-collect-*.tar.gz >/dev/null 2>&1; then ok "导出兜底 tar 生成"; else no "导出兜底 tar 生成"; fi
+TGZ_OUT=$(ls "${HO}"/igpu-results-*.tar.gz 2>/dev/null | head -1)
+if [ -n "${TGZ_OUT}" ]; then ok "导出兜底 tar 生成"; else no "导出兜底 tar 生成"; fi
+if [ -n "${TGZ_OUT}" ] && tar tzf "${TGZ_OUT}" 2>/dev/null | grep -q 'results-a0-gate.txt'; then
+  ok "兜底包含 A0 判定"; else no "兜底包含 A0 判定"; fi
+if [ -n "${TGZ_OUT}" ] && tar tzf "${TGZ_OUT}" 2>/dev/null | grep -q 'results-pre2b-'; then
+  ok "兜底包含 pre2b 证据包"; else no "兜底包含 pre2b 证据包"; fi
+if [ -f "${K}/results-a0-gate.txt" ]; then ok "A0 结果落在 bundle"; else no "A0 结果落在 bundle"; fi
 if grep -q 'A0 判定' "${T}/out.txt"; then ok "阶段0 打印 A0 判定"; else no "阶段0 打印 A0 判定"; fi
 cleanup
 

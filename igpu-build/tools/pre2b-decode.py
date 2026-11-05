@@ -162,9 +162,27 @@ def parse_edid(pre2b):
     return max(found, key=len), None
 
 
+def candidate_dirs(bundle):
+    """证据可能落的位置：bundle 本身（现场脚本的写法）、它的上级、调用者家目录。
+
+    sudo 下 Path.home() 是 /var/root，所以 SUDO_USER 的家目录要单独补上。
+    """
+    dirs = [bundle, bundle.parent, pathlib.Path.home()]
+    su = os.environ.get("SUDO_USER")
+    if su:
+        dirs.append(pathlib.Path("/Users") / su)
+    seen, out = set(), []
+    for d in dirs:
+        k = str(d)
+        if k not in seen:
+            seen.add(k)
+            out.append(d)
+    return out
+
+
 def parse_a0(bundle):
-    for p in (bundle.parent / "results-a0-gate.txt",
-              pathlib.Path.home() / "results-a0-gate.txt"):
+    for d in candidate_dirs(bundle):
+        p = d / "results-a0-gate.txt"
         if p.is_file():
             for line in p.read_text("utf-8", "ignore").splitlines():
                 if line.startswith("RESULT: "):
@@ -262,8 +280,8 @@ def build_model(bundle):
             g1 = "PASS"
     g2 = "PASS" if container.get("route") else "FAIL"
     g3 = "PASS" if (plan is not None and measured.pipesrc is not None) else "FAIL"
-    g4 = "PASS" if ((bundle.parent / "RECOVERY-EFI-VERIFIED.txt").is_file()
-                    or (pathlib.Path.home() / "RECOVERY-EFI-VERIFIED.txt").is_file()) else "FAIL"
+    g4 = "PASS" if any((d / "RECOVERY-EFI-VERIFIED.txt").is_file()
+                       for d in candidate_dirs(bundle)) else "FAIL"
 
     model = {
         "schema_version": SCHEMA_VERSION,
