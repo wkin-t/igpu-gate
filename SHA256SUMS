@@ -119,6 +119,9 @@ c52e35f6bfb5909df9ce3ccbee63c4e1e23e1dc138233ccd511733a966e80593  igpu-build/adl
 c2fb500ff6c6b406536dff5f9f01e96286725f316c3bed0f0623d98cb0040bac  igpu-build/adl-s-fork/mapkit-resolve-compat/resolve_compat.m
 986bdafeffa51156643a4d3bd0320d6a30f7cf28e2215ee77e1bcea69b1db2e9  igpu-build/adl-s-fork/prebuilt/control
 bea653442ee7d5e74ccc28807cef710d6f5e1e9253e0ed90651fd6639436a6ab  igpu-build/adl-s-fork/prebuilt/manual-gate-current.json
+6686de10a28a2fe11b36cbb86dcbacc827cfc4ea116b4dabf1845e5aee629e9b  igpu-build/adl-s-fork/prebuilt/ReimsADLManualActivation.kext/Contents/_CodeSignature/CodeResources
+d505360b38547db620d883e096b266dbb5d2235bd4b9b914ddafcf6be2e14862  igpu-build/adl-s-fork/prebuilt/ReimsADLManualActivation.kext/Contents/Info.plist
+ae40944bda707cba3859f1750a0fc99a65115954d606ccd52b335fc22988b2b6  igpu-build/adl-s-fork/prebuilt/ReimsADLManualActivation.kext/Contents/MacOS/ReimsADLManualActivation
 6f5ec2390dc7817a93920e1b8c2077201ba955c73a67531897937a39c012aef8  igpu-build/adl-s-fork/prebuilt/SHA256SUMS
 990fbd6805abe3d4c708b69628d0da5b011842e87d16b03d33b66c0d59427eea  igpu-build/adl-s-fork/README.md
 68197e24c5c4357738bd9a72cf3ef6e958e401f81cd3cee13fd71a0ea04d747d  igpu-build/adl-s-fork/scripts/build-userspace.sh
