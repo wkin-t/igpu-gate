@@ -1,5 +1,10 @@
 # 依赖关系与"能否开始编码"判定表
 
+> **2026-11-06 路线更正（以本段为准）**：主线回到路线 A'——基于 fork `wkin-t/IntelIGPU-Tahoe`（本地 `D:\IntelIGPU-Tahoe`，`adl-s` 分支）移植到 ADL-S 8086:4680。
+> 内核组件走 AuxKC（`/Library/Extensions` + `kmutil`），**不再**走"自研 IOFramebuffer 子类 + OC `Kernel/Add`"（跨 KC 依赖不成立）。
+> 顺序改为先验证加速器（P2），再做显示（P3/P4）。工作流程见 `E:\TestProjects\20261013_macos\.scratch\igpu-driver\fork-plan-20261106.md`。
+
+
 > 目的：把"证据 → 判据 → 结论 → 下一步"写死，避免在没有前置证据的情况下写代码，
 > 也避免把"某一步失败"误当成"结论"。**未测即未知，未知不得折算成兼容。**
 
@@ -35,7 +40,7 @@ kext 源码 (CI 编译)  ──┼──► dist/IGPUProbe.kext│  ├─ 14-a0
 | 门 | 判据（机器可判） | 不通过时怎么办 |
 |---|---|---|
 | **G1 2a 判物** | 3 轮 `results-collect-*` 齐全；`mode` 依序 `normal/off/normal`；`probe_loaded` 依序 `yes/no/yes`；每轮 `material_complete=yes` | 补齐缺轮；`dirty` 先查 boot-args 与 config 基线 |
-| **G2 驱动容器** | `results-a0-gate.txt` 有确定 `RESULT`（不是 `GATE-INVALID`）；`results-pre2b/02-kc.txt` 给出模块在哪个 collection；`03-auxkc.txt` 给出 SIP 与 `/L/E`、aux KC 状态 | 若 A0 = `A0-CROSS-KC-IMPOSSIBLE` 且 AuxKC 不可行 ⇒ 2b 容器未定，**不能写接管代码** |
+| **G2 驱动容器** | `results-a0-gate.txt` 有确定 `RESULT`（不是 `GATE-INVALID`）；`results-pre2b/02-kc.txt` 给出模块在哪个 collection；`03-auxkc.txt` 给出 SIP 与 `/L/E`、aux KC 状态 | 若 A0 = `A0-CROSS-KC-IMPOSSIBLE` 且 AuxKC 不可行 ⇒ 2b 容器未定，**不能写接管代码**。**2026-11-06 起**：A0 已由离线证据定为跨 KC 不可行，G2 只看 AuxKC 可行性（SIP 取值、`/L/E` 可写、`kmutil` 能重建 aux KC），由 fork 的 P1 现场包实测 |
 | **G3 A1 基线** | `results-fbdescribe-*` 里 `fb_like_nodes>=1`；`results-pre2b/16-edid.txt` 解出首选时序；collect 里有 `PLANE_SURF_1_A`/`PLANE_STRIDE_1_A` 读数 | 缺哪个补哪个；EDID 解不出就用 DTD 原始字节离线解 |
 | **G4 回滚链路** | 恢复 EFI 实际启动验证过一次（人工确认，写进 `results-pre2b/INDEX.txt`） | 没有可启动的恢复入口，不进 A2 |
 

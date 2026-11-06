@@ -77,6 +77,10 @@ jobs:
             python3 "$f"
           done
 
+      - name: ADL-S 现场包仿真（fork 快照，真 bash 3.2）
+        shell: bash
+        run: bash igpu-build/adl-s-fork/field/test/run-field.sh
+
       - name: 失败诊断日志（只传测试日志，不传整目录）
         if: always()
         uses: actions/upload-artifact@v7

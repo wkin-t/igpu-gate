@@ -1,0 +1,96 @@
+name: adl-s
+
+on:
+  push:
+    branches: [adl-s]
+  pull_request:
+    branches: [adl-s]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-test:
+    # Same build as the target system (Tahoe 25G83), Xcode 26.x, SDK 26.5.
+    runs-on: macos-26
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Toolchain identity
+        run: |
+          sw_vers
+          xcodebuild -version
+          xcrun --sdk macosx --show-sdk-version
+
+      - name: No Apple binaries or machine identifiers in the tree
+        run: |
+          set -euo pipefail
+          found=0
+          while IFS= read -r -d '' f; do
+            magic=$(xxd -p -l 4 "$f" || true)
+            case "$magic" in
+              cffaedfe|cefaedfe|cafebabe|bebafeca)
+                echo "::error file=$f::Mach-O binary committed"; found=1 ;;
+            esac
+          done < <(git ls-files -z)
+          if git ls-files | grep -Ei '(^|/)(AppleIntel[A-Za-z]*|libigdmd[^/]*\.dylib|NativeHEVCVA)$'; then
+            echo "::error::Apple component file name committed"; found=1
+          fi
+          if git grep -nIE 'IOPlatformSerialNumber"? *= *"[A-Z0-9]{8,}|IOPlatformUUID"? *= *"[0-9A-F-]{36}' ; then
+            echo "::error::machine identifier committed"; found=1
+          fi
+          exit "$found"
+
+      - name: Python and unit tests
+        run: bash scripts/test.sh
+
+      - name: Prepare script rejects unknown input without writing
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/fake.kext/Contents/MacOS
+          head -c 4096 /dev/urandom > /tmp/fake.kext/Contents/MacOS/AppleIntelTGLGraphics
+          if python3 desktop-manual-20260917/fix/prepare-deferred-runtime.py --check-only /tmp/fake.kext; then
+            echo "::error::random input was accepted"; exit 1
+          fi
+          test ! -e desktop-manual-20260917/fix/ReimsTGLManualRuntime.kext
+
+      - name: Build ManualActivation kext
+        run: bash desktop-manual-20260917/fix/manual-gate/build.sh
+
+      - name: Build user-space components and control tool
+        run: bash scripts/build-userspace.sh
+
+      - name: OpenCore delta on the sanitized fixture
+        run: |
+          set -euo pipefail
+          cfg=field/test/fixture-config.plist
+          python3 field/oc_delta.py check --config "$cfg"
+          python3 field/oc_delta.py apply --config "$cfg" --out /tmp/applied.plist
+          python3 field/oc_delta.py verify --config /tmp/applied.plist --orig "$cfg"
+          if python3 field/oc_delta.py check --config /tmp/applied.plist; then
+            echo "::error::delta applied twice"; exit 1
+          fi
+
+      - name: Field script simulation (real macOS sh + bash 3.2)
+        run: |
+          bash --version | head -1
+          bash field/test/run-field.sh
+
+      - name: Assemble prebuilt field artifacts
+        run: |
+          set -euo pipefail
+          mkdir -p prebuilt
+          ditto desktop-manual-20260917/fix/manual-gate/build/ReimsADLManualActivation.kext prebuilt/ReimsADLManualActivation.kext
+          cp desktop-manual-20260917/fix/manual-gate/control prebuilt/control
+          cp desktop-manual-20260917/fix/manual-gate-current.json prebuilt/manual-gate-current.json
+          python3 field/field_check.py receipt prebuilt/ReimsADLManualActivation.kext prebuilt/manual-gate-current.json
+          (cd prebuilt && find . -type f ! -name SHA256SUMS | sort | xargs shasum -a 256 > /tmp/prebuilt-sums && mv /tmp/prebuilt-sums SHA256SUMS && shasum -a 256 -c SHA256SUMS)
+
+      - name: Upload prebuilt field artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: adl-s-prebuilt
+          path: prebuilt/
+          if-no-files-found: error
