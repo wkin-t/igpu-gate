@@ -4,7 +4,7 @@
 Delta (nothing else may change):
   DeviceProperties/Add/PciRoot(0x0)/Pci(0x2,0x0)  device-id = FFFF0000 (boot isolation)
   Kernel/Block  com.apple.driver.AppleIntelTGLGraphics, lab.reims.ReimsADLDesktopLink (Exclude, Darwin 25)
-  NVRAM/Add/<Apple GUID>/csr-active-config = 430A0000 (AuxKC needs unsigned kexts; machine-wide)
+  NVRAM/Add/<Apple GUID>/csr-active-config = 03000000 (UNTRUSTED_KEXTS|UNRESTRICTED_FS: AuxKC needs unsigned kexts; machine-wide)
   NVRAM/Add/<Apple GUID>/boot-args gains -allow3d (TGL probe rejects real device ids without it)
 
 Exit codes: 0 ok; 2 usage; 3 config cannot accept the delta; 4 verification failed.
@@ -20,7 +20,7 @@ import sys
 APPLE_GUID = "7C436110-AB2A-4BBB-A880-FE41995C9F82"
 GFX_PATH = "PciRoot(0x0)/Pci(0x2,0x0)"
 ISOLATED_ID = bytes.fromhex("ffff0000")
-CSR_RELAXED = bytes.fromhex("430a0000")
+CSR_RELAXED = bytes.fromhex("03000000")
 CSR_DEFAULT = bytes.fromhex("00000000")
 ALLOW3D = "-allow3d"
 BLOCK_IDS = ("com.apple.driver.AppleIntelTGLGraphics", "lab.reims.ReimsADLDesktopLink")

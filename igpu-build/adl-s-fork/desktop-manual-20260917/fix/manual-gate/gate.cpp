@@ -27,6 +27,13 @@ static bool supportedPhysicalIdentity(IOPCIDevice *pci) {
         if (gpu.device==device && gpu.revision==revision) return true;
     return false;
 }
+static UInt16 pci_device_id(IOService *provider) {
+    auto *pci=OSDynamicCast(IOPCIDevice,provider);
+    return pci?pci->configRead16(kIOPCIConfigDeviceID):0;
+}
+// DesktopLink and the native framebuffer are still ADL-P only (display 13, eDP,
+// transcoder A -> PHY A). Other allow-listed devices stay in accelerator-only mode.
+static const UInt16 kDisplayValidatedDevice=0x46a3;
 static bool isolatedADLP(IOPCIDevice *pci) {
     if (!pci || pci->isInactive()) return false;
     char path[512]; int size=sizeof(path);
@@ -57,6 +64,9 @@ public:
         if (!isolatedADLP(OSDynamicCast(IOPCIDevice,provider))) return false;
         if (!IOService::start(provider)) return false;
         setProperty("PhysicalIdentityVerified",true);
+        // device-id is spoofed to FFFF, so session.py reads the real ID from here
+        // to refuse the display flow on devices it has not been ported to.
+        setProperty("PhysicalDeviceID",pci_device_id(provider),16);
         setProperty("GPUAccess","none: PCI identity reads only");
         registerService(); return true;
     }
@@ -211,7 +221,7 @@ public:
             OSSafeReleaseNULL(accel); OSSafeReleaseNULL(probe); OSSafeReleaseNULL(pci);
         } else if (action->isEqualTo("PrepareDisplay") || action->isEqualTo("CommitDisplay")) {
             auto *pci=copyTarget();
-            if (!pci) result=kIOReturnUnsupported;
+            if (!pci || pci_device_id(pci)!=kDisplayValidatedDevice) result=kIOReturnUnsupported;
             else result=action->isEqualTo("PrepareDisplay")?prepareLink(pci):commitDisplay(pci);
             OSSafeReleaseNULL(pci);
         }

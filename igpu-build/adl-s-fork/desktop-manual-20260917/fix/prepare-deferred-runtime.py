@@ -7,8 +7,14 @@ code, and the same Apple build circulates with different signatures.
 Patch set (each patch asserts the exact original bytes before writing):
   P-0001  IntelAccelerator::start: NOP the registerService() call (upstream).
   P-0002  IntelAccelerator::probe: map 0x4680 (ADL-S GT1) to GPU SKU 2 by
-          replacing the 0x9a48 entry of the device-id table. Without it probe
-          reaches "Failed to map Device ID ... to GPU SKU!" and panics.
+          replacing the 0xff20 (pre-silicon) entry of the device-id chain.
+          The chain starts with a *signed* cmp edi,0xdeafbeee; jg: real TGL
+          ids (0x9a40/0x9a48) are negative as int32 and take the first branch,
+          0x46808086 is positive and always takes the second one, so only the
+          entries on that branch (deafbeef, ff20) are reachable for it.
+          Without the patch probe reaches "Failed to map Device ID ... to GPU
+          SKU!" and panics. simulate_probe_chain() proves reachability on the
+          patched bytes; byte comparison alone does not.
   P-0003  IntelAccelerator::getGPUInfo: accept 1 slice x 4 subslices without
           the pre-silicon flag, so the GT1 topology gets L3BankCount=4 instead
           of falling through with L3BankCount unset.
@@ -29,13 +35,15 @@ ACCEPTED_FILE_SHA256 = {
 PATCHES = [
     # (id, file offset, original bytes, replacement bytes)
     ('P-0001', 0x246b5, bytes.fromhex('ff90b0050000'), b'\x90' * 6),
-    ('P-0002', 0x23c2f, bytes.fromhex('81ff8680489a'), bytes.fromhex('81ff86808046')),
+    ('P-0002', 0x23c54, bytes.fromhex('81ff868020ff'), bytes.fromhex('81ff86808046')),
     ('P-0003', 0x287ea, bytes.fromhex('7412'), b'\x90\x90'),
 ]
 # Context that must surround each site, so a shifted build cannot be patched.
 CONTEXT = {
     'P-0001': (0x246b5 - 12, bytes.fromhex('498b45004531ff4c89ef31f6')),
-    'P-0002': (0x23c1f, bytes.fromhex('81ffeebeafde7f1581ff8680409a742d')),
+    # The whole compare chain is pinned, because simulate_probe_chain() relies on it.
+    'P-0002': (0x23c1f, bytes.fromhex('81ffeebeafde7f1581ff8680409a742d81ff8680489a7425e8cecb0600'
+                                      '81ffefbeafde751041c7862011000001000000e9f2fcffff')),
     'P-0003': (0x287df, bytes.fromhex('83fe01751a83e0204885c0')),
 }
 
@@ -98,15 +106,110 @@ def verify_code(b, info):
         assert b[site:site + len(original)] == original, f'{pid} original bytes mismatch'
 
 
+REG32 = {0: 'eax', 1: 'ecx', 2: 'edx', 3: 'ebx', 6: 'esi', 7: 'edi'}
+PROBE_COLD_PANIC = 0x9080a  # IntelAccelerator::probe.cold.1: "Failed to map Device ID" -> panic
+# field_check.py parses this probe log line; P2 fails if the format ever differs.
+FOUND_DEVICE_FORMAT = b'[IGPU] %s: Found device with ID 0x%08x, revision 0x%x,'
+
+
+def run_block(b, start, regs, stop, limit=200):
+    """Interpret the small, fixed instruction subset used by the patched blocks.
+
+    Returns (exit_address, {disp: imm}) for every `mov dword [r14/r15+disp], imm`.
+    Unknown opcodes raise: the caller then refuses to build rather than guess.
+    """
+    regs = dict(regs); writes = {}; ip = start; flags = None
+    s32 = lambda v: v - (1 << 32) if v & 0x80000000 else v
+    def cmp(a, c):
+        return (a & 0xffffffff, c & 0xffffffff)
+    def taken(cc):
+        a, c = flags
+        return {'74': a == c, '75': a != c, '7f': s32(a) > s32(c), '84': a == c, '85': a != c}[cc]
+    for _ in range(limit):
+        if ip in stop:
+            return ip, writes
+        op = b[ip]
+        if op == 0x90:
+            ip += 1
+        elif op == 0x81 and b[ip + 1] & 0xf8 == 0xf8:      # cmp r32, imm32
+            flags = cmp(regs[REG32[b[ip + 1] & 7]], struct.unpack_from('<I', b, ip + 2)[0]); ip += 6
+        elif op == 0x83 and b[ip + 1] & 0xf8 == 0xf8:      # cmp r32, imm8
+            flags = cmp(regs[REG32[b[ip + 1] & 7]], b[ip + 2]); ip += 3
+        elif op == 0x83 and b[ip + 1] == 0xe0:             # and eax, imm8
+            regs['eax'] &= b[ip + 2]; ip += 3
+        elif op == 0x39 and b[ip + 1] == 0xf9:             # cmp ecx, edi
+            flags = cmp(regs['ecx'], regs['edi']); ip += 2
+        elif b[ip:ip + 3] == b'\x48\x85\xc0':              # test rax, rax
+            flags = cmp(regs['eax'], 0); ip += 3
+        elif op in (0x74, 0x75, 0x7f):
+            rel = struct.unpack_from('<b', b, ip + 1)[0]
+            ip = ip + 2 + rel if taken(f'{op:02x}') else ip + 2
+        elif op == 0x0f and b[ip + 1] in (0x84, 0x85):
+            rel = struct.unpack_from('<i', b, ip + 2)[0]
+            ip = ip + 6 + rel if taken(f'{b[ip + 1]:02x}') else ip + 6
+        elif op == 0xeb:
+            ip = ip + 2 + struct.unpack_from('<b', b, ip + 1)[0]
+        elif op == 0xe9:
+            ip = ip + 5 + struct.unpack_from('<i', b, ip + 1)[0]
+        elif op == 0xe8:                                   # call rel32
+            target = ip + 5 + struct.unpack_from('<i', b, ip + 1)[0]
+            if target in stop:
+                return target, writes
+            ip += 5                                        # logging helpers only
+        elif op == 0x41 and b[ip + 1] == 0xc7 and b[ip + 2] in (0x86, 0x87):
+            disp, imm = struct.unpack_from('<II', b, ip + 3)
+            writes[disp] = imm; ip += 11
+        elif op == 0x41 and b[ip + 1] == 0x8b and b[ip + 2] in (0x97, 0xb7):
+            ip += 7                                        # reload of an already-known field
+        elif b[ip:ip + 3] in (b'\x48\x8d\x1d', ):
+            ip += 7
+        elif b[ip:ip + 3] == b'\x48\x89\xdf' or b[ip:ip + 2] == b'\x31\xc0':
+            ip += 3 if b[ip] == 0x48 else 2
+        else:
+            raise AssertionError(f'unsupported opcode {b[ip:ip + 4].hex()} at {ip:#x}')
+    raise AssertionError('instruction limit reached')
+
+
+def probe_sku(b, device):
+    """SKU the probe device-id chain assigns to `device`, or 'panic'."""
+    exit_at, writes = run_block(b, 0x23c1f, {'edi': device}, {0x23946, PROBE_COLD_PANIC})
+    return 'panic' if exit_at == PROBE_COLD_PANIC else writes.get(0x1120)
+
+
+def l3_banks(b, sku, slices, subslices, flags):
+    _, writes = run_block(b, 0x28774, {'ecx': sku, 'edi': 1, 'esi': slices, 'edx': subslices, 'eax': flags},
+                          {0x28827, 0x28842})
+    return writes.get(0x1164)
+
+
+def verify_semantics(original, patched):
+    # Behaviour that must change: the ADL-S GT1 path.
+    assert probe_sku(original, 0x46808086) == 'panic', 'unpatched input should not know 0x4680'
+    assert probe_sku(patched, 0x46808086) == 2, 'patched probe does not map 0x4680 to SKU 2'
+    assert l3_banks(original, 2, 1, 4, 0) is None
+    assert l3_banks(patched, 2, 1, 4, 0) == 4, 'patched getGPUInfo does not accept 1x4 topology'
+    # Behaviour that must not change.
+    for device, sku in ((0x9a408086, 2), (0x9a488086, 2), (0xdeafbeef, 1)):
+        assert probe_sku(patched, device) == sku, f'{device:#x} mapping changed'
+    assert l3_banks(patched, 2, 1, 12, 0) == 8
+    return {
+        'probe_sku_0x46808086': probe_sku(patched, 0x46808086),
+        'probe_sku_0xff208086_after_patch': probe_sku(patched, 0xff208086),
+        'l3_banks_1x4': l3_banks(patched, 2, 1, 4, 0),
+    }
+
+
 def build_candidate(b):
     info = parse(b)
     identity = identify(b, info)
     verify_code(b, info)
+    assert b.count(FOUND_DEVICE_FORMAT) == 1, 'probe "Found device" log format differs from the field parser'
     patched = bytearray(b)
     applied = []
     for pid, site, original, replacement in PATCHES:
         patched[site:site + len(original)] = replacement
         applied.append({'id': pid, 'file_offset': hex(site), 'from': original.hex(), 'to': replacement.hex()})
+    semantics = verify_semantics(b, bytes(patched))
     changed = [i for i in range(len(b)) if b[i] != patched[i]]
     expected_changes = sum(sum(x != y for x, y in zip(p[2], p[3])) for p in PATCHES)
     assert len(changed) == expected_changes, 'unexpected number of changed bytes'
@@ -118,6 +221,8 @@ def build_candidate(b):
         'source_body_sha256': info['body_sha256'],
         'source_sha256': hashlib.sha256(b).hexdigest(),
         'patches': applied,
+        'semantic_checks': semantics,
+        'probe_log_format': FOUND_DEVICE_FORMAT.decode(),
         'functional_text_change_bytes': len(changed),
         'candidate_uuid': deferred_uuid.hex(),
         'supported_device_ids': ['0x46a3 (upstream, requires its own patched input)', '0x4680'],

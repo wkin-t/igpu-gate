@@ -24,11 +24,21 @@ LINK = pathlib.Path("/Library/Extensions/ReimsADLDesktopLink.kext")
 METAL = pathlib.Path("/Library/GPUBundles/ReimsTahoeTGLGraphicsMTLDriver.bundle")
 LINK_RECEIPT = ROOT / "desktop-reset-recovery-20260917/source/desktop-link/desktop-link-current.json"
 LOCK = pathlib.Path("/private/var/run/reims-igpu-start.lock")
+# DesktopLink and the native framebuffer are still ADL-P only; ADL-S stays in --accel-only.
+FULL_FLOW_DEVICES = (0x46a3,)
 
 
 def require(condition, message):
     if not condition:
         raise RuntimeError(message)
+
+
+class AccelOnlyStopped(RuntimeError):
+    """Accelerator-only startup did not finish; `outcome` says where it stopped."""
+
+    def __init__(self, outcome, message):
+        super().__init__(message)
+        self.outcome = outcome
 
 
 def run(args, timeout=10):
@@ -130,6 +140,35 @@ def runtime_state(pci):
     return "prepared"
 
 
+def physical_device_id(pci):
+    """Real PCI device ID, published by the read-only match probe (device-id is spoofed to FFFF)."""
+    if not objects(pci, "ReimsADLManualMatchProbe"):
+        action("SelfTest")
+    deadline = time.monotonic() + 5
+    while True:
+        probes = objects(registry(), "ReimsADLManualMatchProbe")
+        if probes:
+            return probes[0].get("PhysicalDeviceID")
+        require(time.monotonic() < deadline, "Read-only matching self-test did not appear")
+        time.sleep(0.25)
+
+
+def require_full_flow_device(pci):
+    # Prepared/published states were reached through PrepareDisplay, which the
+    # gate already refuses on other devices; only a cold start needs this check.
+    if runtime_state(pci) != "cold":
+        return
+    device = physical_device_id(pci)
+    require(
+        device is not None,
+        "ManualActivation does not publish PhysicalDeviceID; reinstall it from the current build receipt",
+    )
+    require(
+        device in FULL_FLOW_DEVICES,
+        f"Full display flow is not ported to this GPU (physical device {device:#06x}); use igpu-start --accel-only",
+    )
+
+
 def preflight():
     require(os.geteuid() == 0, "Run the single startup command as administrator")
     require(
@@ -167,6 +206,8 @@ def preflight():
         pci.get("device-id") == bytes.fromhex("ffff0000"),
         "FFFF startup isolation changed",
     )
+    require_full_flow_device(pci)
+    pci = registry()
 
     link_loaded = loaded_entry(
         loaded,
@@ -310,6 +351,8 @@ def save_failure(logdir, stage, error):
         "error_type": type(error).__name__,
         "error": str(error),
     }
+    if isinstance(error, AccelOnlyStopped):
+        failure["outcome"] = error.outcome
     (logdir / "failure.json").write_text(json.dumps(failure, indent=2) + "\n")
     try:
         (logdir / "failed.plist").write_bytes(plistlib.dumps(registry()))
@@ -365,11 +408,11 @@ def accel_only_state(pci):
     return "hidden" if hidden_ready(pci) else "initializing"
 
 
-def kernel_log(logdir, name, minutes=10):
-    """Best effort: the [IGPU] HWCAPS lines are the primary P2 evidence."""
+def kernel_log(logdir, name, started):
+    """Best effort: the [IGPU] lines are the primary P2 evidence. Only this attempt's lines count."""
     try:
         output = run(
-            ["log", "show", "--last", f"{minutes}m", "--style", "compact",
+            ["log", "show", "--start", started, "--style", "compact",
              "--predicate", 'sender == "AppleIntelTGLGraphics" OR eventMessage CONTAINS "[IGPU]"'],
             120,
         )
@@ -395,17 +438,31 @@ def activate_accel_only(pci, logdir):
         state = accel_only_state(pci)
         if state == "hidden":
             break
-        require(time.monotonic() < deadline, "Hidden initialization did not finish within 45 s")
+        if time.monotonic() >= deadline:
+            if state == "cold":
+                raise AccelOnlyStopped(
+                    "probe-failed",
+                    "No IntelAccelerator instance within 45 s: probe rejected the device, start returned false, or matching did not run",
+                )
+            raise AccelOnlyStopped(
+                "start-stuck",
+                "IntelAccelerator exists but start has not returned within 45 s",
+            )
         time.sleep(1)
     accelerator = objects(pci, "IntelAccelerator")[0]
     return pci, {
         "final_state": state,
+        # hidden means start returned success and the service stayed unpublished.
+        # It says nothing about GuC, firmware or command submission.
+        "start_returned_success": True,
+        "gpu_function_proven": False,
         "accelerator_keys": sorted(k for k in accelerator if not k.startswith("IORegistryEntry")),
         "firmware_framebuffer_retained": len(objects(pci, "IONDRVFramebuffer")) == 1,
     }
 
 
 def main_accel_only(logdir):
+    started = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     try:
         pci = preflight_accel_only()
     except Exception as error:
@@ -417,16 +474,16 @@ def main_accel_only(logdir):
         pci, summary = activate_accel_only(pci, logdir)
     except Exception as error:
         save_failure(logdir, "accel-only", error)
-        kernel_log(logdir, "igpu-log.txt")
+        kernel_log(logdir, "igpu-log.txt", started)
         print(f"Accelerator-only startup stopped. Evidence: {logdir}", flush=True)
         raise
     (logdir / "after.plist").write_bytes(plistlib.dumps(pci))
-    kernel_log(logdir, "igpu-log.txt")
+    kernel_log(logdir, "igpu-log.txt", started)
     summary["completed_at"] = datetime.datetime.now().astimezone().isoformat()
     summary["mode"] = "accel-only"
     summary["display_untouched"] = True
     (logdir / "result.json").write_text(json.dumps(summary, indent=2) + "\n")
-    print("Accelerator reached hidden-ready; firmware display kept. Evidence:", logdir, flush=True)
+    print("Accelerator start returned success (not published); firmware display kept. GPU function is not proven. Evidence:", logdir, flush=True)
 
 
 def main():

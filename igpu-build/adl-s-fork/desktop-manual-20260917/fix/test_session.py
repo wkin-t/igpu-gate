@@ -2,6 +2,7 @@
 import copy
 import hashlib
 import importlib.util
+import json
 import pathlib
 import sys
 import tempfile
@@ -269,6 +270,78 @@ class AccelOnlyTests(unittest.TestCase):
         del value["IORegistryEntryChildren"][0]
         with self.assertRaisesRegex(RuntimeError, "firmware framebuffer"):
             SESSION.accel_only_state(value)
+
+    def stop_outcome(self, after_prepare):
+        def action(name, timeout=10):
+            pass
+
+        clock = iter(range(0, 1000, 10))
+        with tempfile.TemporaryDirectory() as directory, patch.object(
+            SESSION, "registry", side_effect=lambda: copy.deepcopy(after_prepare)
+        ), patch.object(SESSION, "action", side_effect=action), patch.object(
+            SESSION.time, "sleep"
+        ), patch.object(SESSION.time, "monotonic", side_effect=lambda: next(clock)):
+            with self.assertRaises(SESSION.AccelOnlyStopped) as caught:
+                SESSION.activate_accel_only(cold(with_probe=True), pathlib.Path(directory))
+        return caught.exception.outcome
+
+    def test_no_instance_is_reported_as_probe_failure(self):
+        self.assertEqual(self.stop_outcome(cold(with_probe=True)), "probe-failed")
+
+    def test_instance_on_a_busy_bus_is_reported_as_start_stuck(self):
+        value = hidden_only()
+        value["IOServiceBusyState"] = 1
+        self.assertEqual(self.stop_outcome(value), "start-stuck")
+
+    def test_outcome_reaches_failure_record(self):
+        with tempfile.TemporaryDirectory() as directory, patch.object(
+            SESSION, "registry", side_effect=RuntimeError("no registry")
+        ):
+            logdir = pathlib.Path(directory)
+            SESSION.save_failure(logdir, "accel-only", SESSION.AccelOnlyStopped("start-stuck", "stuck"))
+            self.assertEqual(json.loads((logdir / "failure.json").read_text())["outcome"], "start-stuck")
+
+    def test_success_summary_does_not_claim_gpu_function(self):
+        _, summary, _ = self.execute(hidden_only())
+        self.assertTrue(summary["start_returned_success"])
+        self.assertFalse(summary["gpu_function_proven"])
+
+
+class FullFlowDeviceTests(unittest.TestCase):
+    def check(self, device_properties, initial=None):
+        probe = item("ReimsADLManualMatchProbe", **device_properties)
+        with_probe = cold()
+        with_probe["IORegistryEntryChildren"].append(probe)
+        actions = []
+
+        def action(name, timeout=10):
+            actions.append(name)
+
+        start = initial if initial is not None else with_probe
+        with patch.object(SESSION, "registry", side_effect=lambda: copy.deepcopy(with_probe)), patch.object(
+            SESSION, "action", side_effect=action
+        ), patch.object(SESSION.time, "sleep"):
+            SESSION.require_full_flow_device(copy.deepcopy(start))
+        return actions
+
+    def test_adl_s_is_refused(self):
+        with self.assertRaisesRegex(RuntimeError, "not ported"):
+            self.check({"PhysicalDeviceID": 0x4680})
+
+    def test_adl_p_is_allowed(self):
+        self.assertEqual(self.check({"PhysicalDeviceID": 0x46a3}), [])
+
+    def test_old_gate_without_identity_asks_for_reinstall(self):
+        with self.assertRaisesRegex(RuntimeError, "reinstall"):
+            self.check({})
+
+    def test_self_test_runs_when_probe_is_absent(self):
+        self.assertEqual(self.check({"PhysicalDeviceID": 0x46a3}, initial=cold()), ["SelfTest"])
+
+    def test_prepared_and_published_states_never_call_self_test(self):
+        # The gate refuses SelfTest twice per boot; these states already passed its device check.
+        for state in (prepared(), published()):
+            self.assertEqual(self.check({"PhysicalDeviceID": 0x4680}, initial=state), [])
 
 
 if __name__ == "__main__":

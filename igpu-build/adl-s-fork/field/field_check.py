@@ -94,22 +94,143 @@ def cmd_json_field(args):
     print(json.loads(pathlib.Path(args.json).read_text())[args.field])
 
 
+def cmd_gfx_path(args):
+    """Rebuild GFX0's IOService path from `ioreg -p IOService -w0` text.
+
+    IORegistryEntry::getPath joins the same name@location components ioreg
+    prints and omits Root and the platform node, so the result compares directly
+    with the gate's kPCIPath.
+    """
+    stack = []
+    found = []
+    for line in pathlib.Path(args.tree).read_text(errors="replace").splitlines():
+        match = re.match(r"^(.*?)\+-o (.+?)  <class ", line)
+        if not match:
+            continue
+        depth = len(match.group(1)) // 2
+        del stack[depth:]
+        stack.append(match.group(2))
+        if re.fullmatch(r"GFX0(@.*)?", match.group(2)):
+            found.append("IOService:/" + "/".join(stack[2:]))
+    print(f"gfx_path_count={len(found)}")
+    print(f"gfx_path={found[0] if found else 'missing'}")
+    print("gfx_path_ok=" + ("yes" if found == [args.expected] else "no"))
+
+
+# Every [IGPU] line is classified; tags overlap (a GuC load failure counts under both).
+# Only `fail` decides P2. `warn` words ("disabled", "invalid", ...) also appear in benign
+# TGL messages, so they are counted for the reader but never fail the run.
+IGPU_TAGS = (
+    ("guc", re.compile(r"guc", re.I)),
+    ("firmware", re.compile(r"(?i:firmware|wopcm|springboard)|\bME\b")),
+    ("fail", re.compile(
+        r"(?i:fail|error|panic|timeout|timed out|fatal|unrecoverable|exception|compromised"
+        r"|never returned|cannot|unable|mismatch|halted|\bhang\b|\bhung\b)")),
+    ("warn", re.compile(r"(?i:invalid|disabled|not enabled|did not|disallowing|not active|\bbad\b)")),
+)
+FOUND_DEVICE = re.compile(r"Found device with ID (0x[0-9a-fA-F]+), revision (0x[0-9a-fA-F]+)")
+PROBE_REJECTED = re.compile(r"\[IGPU\][^\n]*(?:Failing probe|Failed to map Device ID)")
+
+
+def read_log(path):
+    log = pathlib.Path(path)
+    return log.read_text(errors="replace") if log.is_file() else ""
+
+
 def cmd_hwcaps(args):
-    text = pathlib.Path(args.log).read_text(errors="replace")
-    checks = {
-        "sku": r"HWCAPS - GPU Sku: 2\b",
+    """P2 log criteria.
+
+    SKU and L3BankCount come out of P-0002/P-0003, so they only show the patches
+    took effect. EU/slice/subslice come from fuses and describe the hardware.
+    None of this shows the GPU works: GuC and firmware lines are evidence to read.
+    """
+    text = read_log(args.log)
+    found = FOUND_DEVICE.search(text)
+    found_id = found.group(1) if found else "missing"
+    found_rev = found.group(2) if found else "missing"
+    print(f"found_device_id={found_id}")
+    print(f"found_revision={found_rev}")
+    found_ok = bool(found) and int(found_id, 16) == 0x46808086 and int(found_rev, 16) == 0x0c
+
+    patch_checks = {"sku": r"HWCAPS - GPU Sku: 2\b", "l3": r"HWCAPS - L3BankCount:\s*4\b"}
+    hw_checks = {
         "eu": r"ExecutionUnitCount:\s*32\b",
         "slices": r"NumSlices:\s*1\b",
         "subslices": r"NumSubSlices:\s*4\b",
-        "l3": r"HWCAPS - L3BankCount:\s*4\b",
     }
-    bad = re.findall(r"\[IGPU\][^\n]*(?:ERROR|Failed to map|invalid Gfx SKU|initHardwareCapsFailed)[^\n]*", text)
-    missing = [name for name, pattern in checks.items() if not re.search(pattern, text)]
+    missing_patch = [name for name, pattern in patch_checks.items() if not re.search(pattern, text)]
+    missing_hw = [name for name, pattern in hw_checks.items() if not re.search(pattern, text)]
+    missing = (["found"] if not found_ok else []) + missing_patch + missing_hw
     print(f"hwcaps_missing={','.join(missing)}")
-    print(f"hwcaps_errors={len(bad)}")
-    for line in bad[:10]:
-        print(f"hwcaps_error_line={line.strip()}")
-    print("hwcaps=" + ("ok" if not missing and not bad else "mismatch"))
+    print("patch_effective=" + ("yes" if not missing_patch else "no"))
+    print("hw_topology=" + ("ok" if not missing_hw else "mismatch"))
+
+    lines = re.findall(r"\[IGPU\][^\n]*", text)
+    counts = {name: 0 for name, _ in IGPU_TAGS}
+    classified = []
+    failures = []
+    for line in lines:
+        tags = [name for name, pattern in IGPU_TAGS if pattern.search(line)]
+        for tag in tags:
+            counts[tag] += 1
+        if "fail" in tags:
+            failures.append(line)
+        classified.append(f"{','.join(tags) or 'other'}\t{line.rstrip()}")
+    if args.out:
+        pathlib.Path(args.out).write_text("".join(entry + "\n" for entry in classified), encoding="utf-8")
+    print(f"igpu_lines={len(lines)}")
+    print(f"igpu_guc={counts['guc']}")
+    print(f"igpu_firmware={counts['firmware']}")
+    print(f"igpu_fail={counts['fail']}")
+    print(f"igpu_warn={counts['warn']}")
+    version = re.search(r"Graphics Firmware Version: ([0-9.]+)", text)
+    print(f"firmware_version={version.group(1) if version else 'not-seen'}")
+    for line in failures[:20]:
+        print(f"igpu_fail_line={line.strip()}")
+    print("hwcaps=" + ("ok" if not missing and not failures else "mismatch"))
+
+
+def collect_class(node, name):
+    found = [node] if node.get("IOObjectClass") == name else []
+    for child in node.get("IORegistryEntryChildren", []):
+        found.extend(collect_class(child, name))
+    return found
+
+
+def cmd_p2_outcome(args):
+    """Where the accelerator stopped: session failure record first, then registry state."""
+    text = read_log(args.log)
+    print("p2_probe_entered=" + ("yes" if FOUND_DEVICE.search(text) else "no"))
+    failure = pathlib.Path(args.log).with_name("failure.json")
+    if failure.is_file():
+        try:
+            record = json.loads(failure.read_text())
+        except ValueError:
+            record = {}
+        if record.get("stage") == "preflight":
+            print("p2_outcome=preflight-failed")
+            return
+        if record.get("outcome"):
+            print(f"p2_outcome={record['outcome']}")
+            return
+    try:
+        value = plistlib.loads(pathlib.Path(args.plist).read_bytes())
+        root = value[0] if isinstance(value, list) else value
+        accelerators = collect_class(root, "IntelAccelerator")
+    except Exception:
+        print("p2_outcome=unknown")
+        return
+    if not accelerators:
+        # Attach precedes start, so an instance that is gone was rejected or returned false.
+        late = FOUND_DEVICE.search(text) and not PROBE_REJECTED.search(text)
+        print("p2_outcome=" + ("start-failed" if late else "probe-failed"))
+    elif any(entry.get("IOServiceState", 0) & 2 for entry in accelerators):
+        print("p2_outcome=published")
+    elif len(accelerators) == 1 and not accelerators[0].get("IOServiceState", 0) & 1 \
+            and root.get("IOServiceBusyState") == 0:
+        print("p2_outcome=start-returned")
+    else:
+        print("p2_outcome=start-stuck")
 
 
 def main():
@@ -121,7 +242,9 @@ def main():
     p = sub.add_parser("receipt"); p.add_argument("bundle"); p.add_argument("receipt"); p.set_defaults(run=cmd_receipt)
     p = sub.add_parser("loaded"); p.add_argument("showloaded"); p.add_argument("identifier"); p.add_argument("uuid"); p.set_defaults(run=cmd_loaded)
     p = sub.add_parser("json-field"); p.add_argument("json"); p.add_argument("field"); p.set_defaults(run=cmd_json_field)
-    p = sub.add_parser("hwcaps"); p.add_argument("log"); p.set_defaults(run=cmd_hwcaps)
+    p = sub.add_parser("gfx-path"); p.add_argument("tree"); p.add_argument("expected"); p.set_defaults(run=cmd_gfx_path)
+    p = sub.add_parser("hwcaps"); p.add_argument("log"); p.add_argument("--out"); p.set_defaults(run=cmd_hwcaps)
+    p = sub.add_parser("p2-outcome"); p.add_argument("plist"); p.add_argument("log"); p.set_defaults(run=cmd_p2_outcome)
     args = parser.parse_args()
     args.run(args)
 
