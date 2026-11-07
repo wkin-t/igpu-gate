@@ -171,7 +171,11 @@ case "$1" in
   showloaded)
     [ "${2:-}" = "--collection" ] && exit 0
     if [ -d "${FAKE}/Extensions/ReimsTGLBoot.kext" ] && [ -z "${FAKE_RT_UNLOADED:-}" ]; then
-      echo "  1 0 0 0 0 com.apple.driver.AppleIntelTGLGraphics (16.0.3) BBBB0000-0000-0000-0000-000000000002 <1>"; fi
+      if [ -n "${FAKE_RT_WRONG_UUID:-}" ]; then
+        echo "  1 0 0 0 0 com.apple.driver.AppleIntelTGLGraphics (16.0.3) CCCC0000-0000-0000-0000-000000000009 <1>"
+      else
+        echo "  1 0 0 0 0 com.apple.driver.AppleIntelTGLGraphics (16.0.3) BBBB0000-0000-0000-0000-000000000002 <1>"
+      fi; fi
     if [ -d "${FAKE}/Extensions/ReimsADLManualActivation.kext" ]; then
       echo "  2 0 0 0 0 lab.reims.ReimsADLManualActivation (0.2.2) AAAA0000-0000-0000-0000-000000000001 <1>"; fi ;;
 esac
@@ -317,10 +321,31 @@ chk "阶段 install-failed" "$(stage_now)" install-failed
 run --rollback; chk "失败后回滚 config 恢复" "$(cfgsha)" "${ORIG_SHA}"
 has "kmutil 失败后回滚仍重建 AuxKC" 'install' "${T}/kmutil.log"
 
-echo "== 7 P1 失败 =="
-mk; run; reboot_sim; run; reboot_sim; FAKE_RT_UNLOADED=1 run; chk "退出非 0" "$([ $? -ne 0 ] && echo y)" y
-chk "阶段 p1-failed" "$(stage_now)" p1-failed
+echo "== 7 P1：等批准与失败 =="
+mk; run; reboot_sim; run; reboot_sim; FAKE_RT_UNLOADED=1 run; chk "只是没加载：退出 0" "$?" 0
+chk "阶段 awaiting-approval" "$(stage_now)" awaiting-approval
+has "提示去系统设置批准" '隐私与安全性' "${T}/out.txt"
+has "summary 记 AWAITING" 'P1=AWAITING-APPROVAL' "$(ev p1 summary.txt)"
+has "等批准也留 kernelmanagerd 证据" 'log show --last boot' "${T}/log-args.txt"
+FAKE_RT_UNLOADED=1 run; chk "没重启就重跑：退出 3" "$?" 3
+chk "阶段不变" "$(stage_now)" awaiting-approval
+env PATH="${B}:${PATH}" FAKE="${T}" FAKE_UID=0 IGPU_FIELD_ROOT="${T}/root" sh "${FORK}/field/adl-s-field.sh" --status > "${T}/st.txt" 2>&1
+has "--status 指引批准" '点“允许”' "${T}/st.txt"
+reboot_sim; FAKE_RT_UNLOADED=1 run; chk "批准重启后仍没加载：退出非 0" "$([ $? -ne 0 ] && echo y)" y
+chk "只给一次机会：p1-failed" "$(stage_now)" p1-failed
+has "说明是批准后仍未加载" '批准并重启后' "${T}/out.txt"
 run; chk "失败终态不自动重试" "$?" 1
+mk; run; reboot_sim; run; reboot_sim; FAKE_RT_UNLOADED=1 run
+reboot_sim; run; chk "批准后加载：退出 0" "$?" 0
+chk "阶段 p1-pass" "$(stage_now)" p1-pass
+run; chk "随后 P2 可跑" "$?" 0
+chk "阶段 p2-pass" "$(stage_now)" p2-pass
+mk; run; reboot_sim; run; reboot_sim; FAKE_RT_WRONG_UUID=1 run; chk "版本不对不算等批准" "$([ $? -ne 0 ] && echo y)" y
+chk "直接 p1-failed" "$(stage_now)" p1-failed
+mk; run; reboot_sim; run; reboot_sim; FAKE_RT_UNLOADED=1 FAKE_GFX_NODE=IGPU@2 run; chk "没加载且路径不符：不算等批准" "$([ $? -ne 0 ] && echo y)" y
+chk "直接 p1-failed" "$(stage_now)" p1-failed
+mk; to_p1; FAKE_P2_SIGNAL=INT run; reboot_sim; FAKE_RT_UNLOADED=1 run; chk "P2 中断后复核时没加载：不进等批准" "$([ $? -ne 0 ] && echo y)" y
+chk "直接 p1-failed" "$(stage_now)" p1-failed
 
 echo "== 7b GFX0 路径不符 =="
 mk; FAKE_GFX_NODE=IGPU@2 run; chk "第 1 步拒绝" "$([ $? -ne 0 ] && echo y)" y

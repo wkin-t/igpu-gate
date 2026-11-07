@@ -5,7 +5,7 @@
 #   sudo sh adl-s-field.sh --status     看进度（状态目录只有 root 可读，不带 sudo 也会自动提权）
 #   sudo sh adl-s-field.sh --rollback   一键回到部署前（先撤 kext，再还原 config）
 #
-# 阶段：start → config-applied（重启）→ installed（重启）→ p1-pass → p2-pass
+# 阶段：start → config-applied（重启）→ installed（重启）→ [awaiting-approval（批准 + 重启）] → p1-pass → p2-pass
 #       失败终态：p1-failed / p2-failed / p2-crashed / install-failed / config-interrupted /
 #                 rollback-incomplete（都保留证据，都可 --rollback）
 #       p2-interrupted：P2 被 Ctrl-C/关终端打断，不是崩溃；重启后重跑会先复核 P1
@@ -37,7 +37,7 @@ EXPECT_OFF=1048576
 EXPECT_GFX_PATH='IOService:/AppleACPIPlatformExpert/PC00/AppleACPIPCI/GFX0@2'
 OC_VENDOR_GUID=4D1FDA02-38C7-4A6A-9CC6-4BCCA8B30102
 # 0x3 = CSR_ALLOW_UNTRUSTED_KEXTS | CSR_ALLOW_UNRESTRICTED_FS。不含 0x200（UNAPPROVED_KEXTS）：
-# 第三方 kext 可能要在“系统设置”里批准，未经真机验证；P1 失败时会抓 kernelmanagerd 日志区分
+# 新装的第三方 kext 要用户批准一次（上游部署文档同样如此），P1 用 awaiting-approval 阶段承接
 CSR_RELAXED=03000000
 TGL_ID=com.apple.driver.AppleIntelTGLGraphics
 GATE_NAME=ReimsADLManualActivation.kext
@@ -398,8 +398,13 @@ do_install() {
 
 # ---- 第 3 步：P1 判定 -------------------------------------------------------
 do_p1() {
+  _entry=$(stage)
   if same_boot; then
-    log "kext 已安装，但还没重启。请先 sudo reboot，再跑同一条命令。"
+    if [ "${_entry}" = "awaiting-approval" ]; then
+      log "还在等批准：先在“系统设置 → 隐私与安全性”里点“允许”，按提示重启，再跑同一条命令。"
+    else
+      log "kext 已安装，但还没重启。请先 sudo reboot，再跑同一条命令。"
+    fi
     exit 3
   fi
   open_evidence p1
@@ -421,22 +426,52 @@ do_p1() {
   summary "$(printf '%s' "${_gfx}" | tr '\n' ' ')"
   summary "$(printf '%s' "${_path}" | tr '\n' ' ')"
   _why=""
-  [ "${_rt}" = "yes" ] || _why="${_why} TGL运行时加载状态=${_rt}"
-  [ "${_gate}" = "yes" ] || _why="${_why} 控制器加载状态=${_gate}"
+  _load_why=""
+  [ "${_rt}" = "yes" ] || _load_why="${_load_why} TGL运行时加载状态=${_rt}"
+  [ "${_gate}" = "yes" ] || _load_why="${_load_why} 控制器加载状态=${_gate}"
   [ "$(kv "${_gfx}" device_id)" = "ffff0000" ] || _why="${_why} device-id=$(kv "${_gfx}" device_id)"
   [ "$(kv "${_gfx}" firmware_fb)" = "1" ] || _why="${_why} 固件帧缓冲=$(kv "${_gfx}" firmware_fb)"
   [ "$(kv "${_gfx}" accelerator)" = "0" ] || _why="${_why} 加速器已存在=$(kv "${_gfx}" accelerator)"
   [ "$(kv "${_gfx}" native_fb)" = "0" ] || _why="${_why} 原生帧缓冲=$(kv "${_gfx}" native_fb)"
   [ "$(kv "${_path}" gfx_path_ok)" = "yes" ] || _why="${_why} GFX0路径=$(kv "${_path}" gfx_path)（要求 ${EXPECT_GFX_PATH}）"
-  if [ -n "${_why}" ]; then
-    # 区分"加载失败"与"等用户批准"：csr=03000000 不含 CSR_ALLOW_UNAPPROVED_KEXTS，第三方 kext 可能在等批准
+  if [ -n "${_why}${_load_why}" ]; then
+    # csr=03000000 不含 CSR_ALLOW_UNAPPROVED_KEXTS：新装的第三方 kext 要用户在系统设置里批准、重启后才加载。
+    # 上游部署文档同样走这一步。抓这些证据，用来区分"等批准"和"加载失败"
     capture kmutil-aux-collection.txt kmutil inspect --show-aux
     capture kernelmanagerd-log.txt command log show --last boot --style compact \
       --predicate 'process == "kernelmanagerd" OR process == "syspolicyd" OR eventMessage CONTAINS "ReimsTGLBoot" OR eventMessage CONTAINS "ReimsADLManualActivation"'
     capture csrutil-p1.txt csrutil status
+  fi
+  # 只有"没加载"（不是版本不对、不是重复）且其余全部正常，才可能是在等批准；而且只给一次机会
+  _pending=no
+  if [ -z "${_why}" ] && [ -n "${_load_why}" ] && [ "${_entry}" = "installed" ]; then
+    _pending=yes
+    for _s in "${_rt}" "${_gate}"; do
+      case "${_s}" in yes|no) : ;; *) _pending=no ;; esac
+    done
+  fi
+  if [ "${_pending}" = "yes" ]; then
+    record_boot
+    set_stage awaiting-approval
+    summary "P1=AWAITING-APPROVAL"
+    summary "result=awaiting-approval"
+    log ""
+    log "kext 已装好但还没加载：${_load_why}。这通常是在等你批准，不是失败。"
+    log "  1. 打开“系统设置 → 隐私与安全性”，往下找“系统软件已被阻止”之类的提示，点“允许”（需要输入密码）。"
+    log "  2. 按提示重启（没有提示也重启一次）。"
+    log "  3. 重启后再跑同一条命令。"
+    log "找不到“允许”按钮也照样重启再跑一次：仍未加载会判 P1 失败，证据会留下。"
+    log "证据目录：${EV}"
+    exit 0
+  fi
+  _why="${_load_why}${_why}"
+  if [ -n "${_why}" ]; then
     set_stage p1-failed
     summary "P1=FAIL"
-    die "P1 未通过：${_why}。若系统设置里有“系统软件已被阻止”，那是等批准，不是加载失败（见 kernelmanagerd-log.txt）。"
+    if [ "${_entry}" = "awaiting-approval" ]; then
+      die "P1 未通过：批准并重启后 kext 仍未加载：${_why}（见 kernelmanagerd-log.txt、kmutil-aux-collection.txt）。"
+    fi
+    die "P1 未通过：${_why}（见 kernelmanagerd-log.txt）。"
   fi
   record_boot
   set_stage p1-pass
@@ -708,6 +743,7 @@ show_status() {
     start) printf 'next=sudo sh %s（写入 OC 配置）\n' "${SELF}" ;;
     config-applied) printf 'next=重启后再跑一次（安装 kext）\n' ;;
     installed) printf 'next=重启后再跑一次（P1 判定）\n' ;;
+    awaiting-approval) printf 'next=在“系统设置 → 隐私与安全性”点“允许”，重启后再跑一次\n' ;;
     p1-pass) printf 'next=保存工作后再跑一次（P2）\n' ;;
     p2-attempted) printf 'next=再跑一次（判断是崩溃还是被打断）\n' ;;
     p2-interrupted) printf 'next=重启后再跑一次（先复核 P1，不是崩溃）\n' ;;
@@ -744,6 +780,7 @@ case "$(stage)" in
   start) do_config ;;
   config-applied) do_install ;;
   installed) do_p1 ;;
+  awaiting-approval) do_p1 ;;
   p1-pass) do_p2 ;;
   p2-attempted) do_p2_crash_check ;;
   p2-interrupted) do_p2_interrupted ;;

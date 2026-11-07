@@ -15,6 +15,7 @@ sudo sh field/adl-s-field.sh --rollback # 一键回到部署前（之后重启�
 | 1 | 预检（系统版本、真实设备 ID、GFX0 完整路径、恢复 EFI 已验证、TGL 原料结构断言、预编译件收据），备份并写入 OC 增量 | 重启 |
 | 2 | 确认 SIP 已放宽、`-allow3d` 已生效、GPU 已隔离（`device-id=ffff`）；工作副本收回写权限（root:wheel、go-w）；本机打补丁生成 TGL 运行时；放入 `/Library/Extensions` 并重建 AuxKC | 重启（如弹出“系统软件已被阻止”，先批准） |
 | 3 | **P1 判定**：两个 kext 已加载且 UUID 与本次构建一致，GPU 仍隔离，GFX0 完整路径等于 `gate.cpp` 的 `kPCIPath`，只有 1 个固件帧缓冲，没有加速器 | 保存工作 |
+| 3′ | 若**只是** kext 没加载、其余全部正常：进入 `awaiting-approval`，提示去“系统设置 → 隐私与安全性”点“允许”（上游部署文档同样有这一步） | 批准、重启，再跑同一条命令；仍未加载才判 `p1-failed` |
 | 4 | **P2**：`igpu-start --accel-only`，只等到加速器的 `start` 返回成功，不发布、不碰显示；判据见下节 | 带回证据 |
 
 P2 若导致死机：重启后再跑同一条命令，脚本识别出"P2 期间重启"，只收集本次尝试时间之后的 panic 报告和日志，然后停下。运行时匹配规则只活在当次开机里，重启后自动回到 P1 状态。
@@ -55,7 +56,7 @@ Ctrl-C、关终端、进程被杀**不算崩溃**：阶段记为 `p2-interrupted
 
 - `DeviceProperties/Add/PciRoot(0x0)/Pci(0x2,0x0)/device-id = FFFF0000`
 - `Kernel/Block`：`com.apple.driver.AppleIntelTGLGraphics`、`lab.reims.ReimsADLDesktopLink`（Exclude，Darwin 25）。**这两条可能无效**：OC 的 Block 只作用于它处理的 Boot KC，而 TGL 在 System KC、我们的运行时在 AuxKC，都够不到。真正挡住自动匹配的是开机隔离（`device-id=FFFF`）和运行时 kext 里被清空的 `IOKitPersonalities`，不要依赖 Block。
-- `csr-active-config = 03000000`（`CSR_ALLOW_UNTRUSTED_KEXTS | CSR_ALLOW_UNRESTRICTED_FS`）。**未经真机验证**：它不含 `0x200`（`CSR_ALLOW_UNAPPROVED_KEXTS`），装进 AuxKC 的第三方 kext 可能要在“系统设置 → 隐私与安全性”里批准；ad-hoc 签名的 kext 是否有“允许”按钮也未知。P1 失败时脚本会抓 `kmutil inspect --show-aux` 和 kernelmanagerd/syspolicyd 日志，用来区分“等批准”和“加载失败”。
+- `csr-active-config = 03000000`（`CSR_ALLOW_UNTRUSTED_KEXTS | CSR_ALLOW_UNRESTRICTED_FS`）。它不含 `0x200`（`CSR_ALLOW_UNAPPROVED_KEXTS`），所以新装的 kext 要在“系统设置 → 隐私与安全性”里批准一次。这和上游 `docs/DEPLOY-SAME-HARDWARE.md` 的流程一致，现场脚本把它当作正常步骤（`awaiting-approval`），不判失败。本机上 ad-hoc 签名的 kext 是否出现“允许”按钮**未经真机验证**；批准并重启后仍未加载才判 `p1-failed`，并留下 `kmutil inspect --show-aux` 和 kernelmanagerd/syspolicyd 日志。
 - `boot-args` 加 `-allow3d`：TGL 加速器对非仿真设备 ID 不带此参数会直接拒绝 probe
 
 **这些改动对经这个 OC 启动的所有系统都生效，Sonoma 也一样（已确认接受）**：Sonoma 同样 SIP 放宽、GPU 隔离成 `device-id=FFFF`，只能走固件帧缓冲。`Kernel/Block` 限定 Darwin 25，但前两项不分系统。

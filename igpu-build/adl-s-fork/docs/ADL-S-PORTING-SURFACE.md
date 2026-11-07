@@ -29,7 +29,7 @@
 | 11 | `session.py` `verify_receipt_bundle(LINK, …)`、METAL | 必需 | `--accel-only` 下 DesktopLink 与 Metal 包都不检查、不加载 | P2 | 源码 |
 | 12 | `docs/DEPLOY-SAME-HARDWARE.md` 背光 kext | OC `Kernel/Add` ReimsADLBacklight | 台式机不部署（外接显示器无 PWM 背光） | P1 | 源码 |
 | 13 | OC 增量 | GFX0 `device-id=ffff0000`；Block `com.apple.driver.AppleIntelTGLGraphics`、`lab.reims.ReimsADLDesktopLink`（Exclude, Darwin 25） | 相同；DevicePath `PciRoot(0x0)/Pci(0x2,0x0)` 本机一致【P1 核对】。Block 只作用于 Boot KC，对 System KC/AuxKC 里的 kext **可能无效**，不能当保护依赖；`device-id` 隔离对 Sonoma 也生效 | P1 | 源码；Block 效果推测 |
-| 14 | SIP | 上游文档未写 | `csr-active-config=03000000`（放宽未签名 kext + 文件系统）。**整机生效，无法只放宽 Tahoe**（已确认接受）；`WriteFlash=true` 时回滚后要再经这个 OC 启动一次才写回 `00000000` | P1 | 取值未经真机验证 |
+| 14 | SIP | 上游文档未写 | `csr-active-config=03000000`（放宽未签名 kext + 文件系统）。不含 `0x200`，新装 kext 需用户批准一次（与上游部署文档一致，现场脚本有 `awaiting-approval` 阶段）。**整机生效，无法只放宽 Tahoe**（已确认接受）；`WriteFlash=true` 时回滚后要再经这个 OC 启动一次才写回 `00000000` | P1 | 取值未经真机验证 |
 
 ## 3. TGL 加速器设备识别（反汇编摘录）
 
