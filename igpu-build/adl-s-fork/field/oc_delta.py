@@ -142,7 +142,13 @@ def without_delta(cfg):
     return clone
 
 
-def verify_pair(original, updated):
+def verify_pair(original, updated, tolerate_safe_boot=False):
+    if tolerate_safe_boot:
+        # The Windows recovery helper may append -x (safe boot) to an applied config.
+        updated = copy.deepcopy(updated)
+        slot = updated["NVRAM"]["Add"][APPLE_GUID]
+        if "-x" not in str(original["NVRAM"]["Add"][APPLE_GUID].get("boot-args", "")).split():
+            slot["boot-args"] = " ".join(t for t in str(slot.get("boot-args", "")).split() if t != "-x")
     if status(updated) != "applied":
         refuse("delta is not fully present after writing", 4)
     baseline = copy.deepcopy(original)
@@ -159,6 +165,8 @@ def main():
     parser.add_argument("--config", required=True)
     parser.add_argument("--out", help="apply: destination for the updated config")
     parser.add_argument("--orig", help="verify: the config as it was before apply")
+    parser.add_argument("--tolerate-safe-boot", action="store_true",
+                        help="verify: accept an extra -x in boot-args (Windows safe-boot recovery)")
     args = parser.parse_args()
     cfg = load(args.config)
     if args.action == "status":
@@ -181,7 +189,7 @@ def main():
     else:
         if not args.orig:
             parser.error("verify requires --orig")
-        verify_pair(load(args.orig), cfg)
+        verify_pair(load(args.orig), cfg, args.tolerate_safe_boot)
         print("delta=verified")
 
 

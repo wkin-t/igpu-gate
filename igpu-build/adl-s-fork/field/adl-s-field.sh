@@ -24,8 +24,23 @@ FORK_SRC=${IGPU_FORK_SRC:-$(cd "${FIELD_DIR}/.." && pwd -P)}
 PREBUILT="${FORK_SRC}/prebuilt"
 ROOT=${IGPU_FIELD_ROOT:-/var/igpu-adl-s}
 EXT_DIR=${IGPU_EXT_DIR:-/Library/Extensions}
-TGL_INPUT=${IGPU_TGL_INPUT:-/Volumes/CLONEZILLA/igpu-tgl-input/AppleIntelTGLGraphics.kext}
-EVIDENCE_ROOT=${IGPU_EVIDENCE_ROOT:-/Volumes/CLONEZILLA/igpu}
+# 交换盘（U 盘 FAT32 分区）的根目录：从本脚本位置往上找含 igpu-tgl-input 的目录。
+# 不能写死 /Volumes/CLONEZILLA：卷名可能变成 "CLONEZILLA 1"；环境变量也传不过 sudo。
+find_usb_root() {
+  _d=${FIELD_DIR}; _i=0
+  while [ "${_i}" -lt 8 ]; do
+    _d=$(dirname "${_d}")
+    if [ -d "${_d}/igpu-tgl-input" ]; then printf '%s' "${_d}"; return 0; fi
+    [ "${_d}" = "/" ] && break
+    _i=$((_i + 1))
+  done
+  printf '%s' /Volumes/CLONEZILLA
+}
+USB_ROOT=${IGPU_USB_ROOT:-$(find_usb_root)}
+TGL_INPUT=${IGPU_TGL_INPUT:-${USB_ROOT}/igpu-tgl-input/AppleIntelTGLGraphics.kext}
+EVIDENCE_ROOT=${IGPU_EVIDENCE_ROOT:-${USB_ROOT}/igpu}
+# Windows 侧恢复演练（双击“恢复Mac启动”选 1）成功后写在 U 盘根目录的凭证
+DRILL_FILE=${IGPU_DRILL_FILE:-${USB_ROOT}/RECOVERY-DRILL-OK.txt}
 PANIC_DIR=${IGPU_PANIC_DIR:-/Library/Logs/DiagnosticReports}
 EXPECT_BUILD=25G83
 EXPECT_DEVICE=80460000
@@ -96,7 +111,8 @@ die() {
 
 open_evidence() {
   _base=${EVIDENCE_ROOT}
-  if ! mkdir -p "${_base}" 2>/dev/null || [ ! -w "${_base}" ]; then _base="${ROOT}/evidence"; fi
+  # 父目录不存在说明 U 盘没挂上：不能 mkdir -p，否则会在系统盘上造出假的 /Volumes/... 目录
+  if [ ! -d "$(dirname "${_base}")" ] || ! mkdir -p "${_base}" 2>/dev/null || [ ! -w "${_base}" ]; then _base="${ROOT}/evidence"; fi
   mkdir -p "${_base}" || { printf '无法创建证据目录 %s\n' "${_base}" >&2; exit 1; }
   EV="${_base}/results-adl-s-$1-${TS}"
   mkdir -p "${EV}" || { printf '无法创建证据目录 %s\n' "${EV}" >&2; exit 1; }
@@ -237,9 +253,16 @@ do_config() {
   summary "$(printf '%s' "${_path}" | tr '\n' ' ')"
   [ "$(kv "${_path}" gfx_path_ok)" = "yes" ] || die "GFX0 路径不符：$(kv "${_path}" gfx_path)（控制器只认 ${EXPECT_GFX_PATH}）"
 
-  _home=$(eval printf '%s' "~${SUDO_USER:-root}")
+  if [ -n "${SUDO_USER:-}" ]; then
+    _home=$(dscl . -read "/Users/${SUDO_USER}" NFSHomeDirectory 2>/dev/null | awk '{print $2}')
+  else
+    _home=${HOME:-/var/root}
+  fi
   _mark=${IGPU_RECOVERY_MARK:-${_home}/RECOVERY-EFI-VERIFIED.txt}
-  [ -f "${_mark}" ] || die "没有 ${_mark}：恢复 EFI 还没人工验证过（门 G4）。验证后执行 echo ok > ${_mark}"
+  [ -f "${_mark}" ] || die "没有 ${_mark}：恢复通道还没确认过（门 G4）。请用 sh <U盘>/go.sh 运行，它会处理。"
+  [ -f "${DRILL_FILE}" ] || die "没有 ${DRILL_FILE}：还没在 Windows 里演练过恢复（门 G4）。先按 F12 进 Windows，双击桌面上的“恢复Mac启动”选 1。"
+  _drill_sha=$(sed -n 's/^live_sha=//p' "${DRILL_FILE}" | tr -d '\r' | head -1)
+  summary "drill_live_sha=${_drill_sha}"
 
   "${PY}" "${TOOLS}/field_check.py" tgl-input "${TGL_INPUT}" >> "${EV}/transcript.txt" 2>&1 \
     || die "TGL 原料不对或缺失：${TGL_INPUT}"
@@ -260,6 +283,9 @@ do_config() {
     || die "当前配置不能接受增量（详见 delta-check.txt）"
 
   _before=$(take_sha "${_cfg}") || die "读不到 config 哈希"
+  # 演练时 Windows 看到的 config 必须就是现在要改的这份，否则 Windows 侧快照还原不回这里
+  [ "$(printf '%s' "${_drill_sha}" | tr 'A-F' 'a-f')" = "${_before}" ] \
+    || die "Windows 演练时的 config（${_drill_sha:-未记录}）不是现在这份（${_before}）。请重新在 Windows 里双击“恢复Mac启动”选 1 演练一次。"
   _bk="${MOUNT_POINT}/igpu-fork-backup-${TS}-$$"
   mkdir "${_bk}" || die "无法创建 ESP 备份目录"
   cp "${_cfg}" "${_bk}/config.plist" || die "备份 config 失败"
@@ -506,6 +532,21 @@ p2_outcome_text() {
 do_p2() {
   open_evidence p2
   log "== 第 4 步：P2 只激活加速器（显示仍走 IONDRV，不重启桌面）=="
+  # 动 GPU 之前再确认一次部署状态还在：在 Windows 里还原过 config 后，SIP 全开、GPU 未隔离，绝不能跑 P2
+  [ -n "${PY}" ] || die "找不到可用的 python3"
+  nvram -x csr-active-config > "${EV}/nvram-csr-p2.plist" 2>&1
+  _csr=$("${PY}" "${TOOLS}/field_check.py" nvdata "${EV}/nvram-csr-p2.plist" csr-active-config 2>/dev/null)
+  _args=$(sysctl -n kern.bootargs 2>/dev/null)
+  _gfx=$(snapshot_gfx gfx-p2-before.plist) || _gfx=""
+  _pre=""
+  [ "$(kv "${_csr}" csr-active-config)" = "${CSR_RELAXED}" ] || _pre="${_pre} SIP=$(kv "${_csr}" csr-active-config)"
+  case " ${_args} " in *" -allow3d "*) : ;; *) _pre="${_pre} 缺-allow3d" ;; esac
+  case " ${_args} " in *" -x "*) _pre="${_pre} 安全模式" ;; esac
+  [ "$(kv "${_gfx}" device_id)" = "ffff0000" ] || _pre="${_pre} device-id=$(kv "${_gfx}" device_id)"
+  if [ -n "${_pre}" ]; then
+    summary "p2_precheck=${_pre}"
+    die "部署状态已经不在了（${_pre}），不能跑 P2。如果在 Windows 里还原过，请执行 --rollback。"
+  fi
   record_boot
   # 先落盘再动 GPU：一旦死机，下次运行靠这些标记认出是 P2 崩的、以及崩溃证据的起始时间
   date '+%Y-%m-%d %H:%M:%S' > "${P2_MARK}" || die "写尝试时间失败"
@@ -647,9 +688,12 @@ rollback_config() {  # 还原 config；失败只报告，不中止
   # 没记下改后哈希时（写入中途被打断），退而核对"现网 = 备份 + 本工具增量"。
   _ours=no
   if [ -n "${_cur}" ] && [ "${_cur}" = "${_after}" ]; then _ours=yes; fi
-  if [ "${_ours}" = "no" ] && [ -z "${_after}" ] && [ -f "${MOUNT_POINT}/${_name}/config.plist" ] && [ -n "${PY}" ] \
-     && capture delta-verify-rollback.txt "${PY}" "${TOOLS}/oc_delta.py" verify --config "${_cfg}" --orig "${MOUNT_POINT}/${_name}/config.plist"; then
+  # 两种已知变体也算本工具写的：写入中途被打断（没记下改后哈希），以及 Windows 加了 -x 进安全模式
+  if [ "${_ours}" = "no" ] && [ -f "${MOUNT_POINT}/${_name}/config.plist" ] && [ -n "${PY}" ] \
+     && capture delta-verify-rollback.txt "${PY}" "${TOOLS}/oc_delta.py" verify --tolerate-safe-boot \
+          --config "${_cfg}" --orig "${MOUNT_POINT}/${_name}/config.plist"; then
     _ours=yes
+    log "现网 config 是本工具的增量（可能另加了 Windows 写的安全模式 -x），可以还原。"
   fi
   if [ "${_ours}" = "no" ]; then
     cp "${_cfg}" "${EV}/config-unexpected.plist.txt" 2>/dev/null

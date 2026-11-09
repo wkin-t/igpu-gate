@@ -32,6 +32,7 @@ mk() {
   cp "${H}/fixture-config.plist" "${ESP}/EFI/OC/config.plist"
   ORIG_SHA=$(sha "${ESP}/EFI/OC/config.plist")
   echo ok > "${T}/home/RECOVERY-EFI-VERIFIED.txt"
+  printf 'time=2026-11-09T09:00:00\nlive_sha=%s\n' "${ORIG_SHA}" > "${T}/drill.txt"
   echo boot-1 > "${T}/bootid"
   printf 'gate-binary' > "${FORK}/prebuilt/ReimsADLManualActivation.kext/Contents/MacOS/ReimsADLManualActivation"
   printf '<plist version="1.0"><dict/></plist>\n' > "${FORK}/prebuilt/ReimsADLManualActivation.kext/Contents/Info.plist"
@@ -103,7 +104,7 @@ EOS
 #!/bin/sh
 case "$2" in
   kern.bootsessionuuid) cat "${FAKE}/bootid" ;;
-  kern.bootargs) if grep -q allow3d "${FAKE}/ESP/EFI/OC/config.plist" && [ -z "${FAKE_NO_ALLOW3D:-}" ]; then echo "-v -allow3d"; else echo "-v"; fi ;;
+  kern.bootargs) if [ -f "${FAKE}/applied-on-boot" ] && [ -z "${FAKE_NO_ALLOW3D:-}" ]; then echo "-v -allow3d ${FAKE_BOOTARGS_EXTRA:-}"; else echo "-v"; fi ;;
 esac
 EOS
   cat > "${B}/ioreg" <<'EOS'
@@ -224,8 +225,9 @@ EOS
 run() {  # run [参数...]
   env PATH="${B}:${PATH}" FAKE="${T}" FAKE_PY="${PYBIN}" HOME="${T}/home" \
       IGPU_FORK_SRC="${FORK}" IGPU_FIELD_ROOT="${T}/root" IGPU_EXT_DIR="${T}/Extensions" \
-      IGPU_TGL_INPUT="${T}/tgl/AppleIntelTGLGraphics.kext" IGPU_EVIDENCE_ROOT="${T}/evidence" \
+      IGPU_TGL_INPUT="${T}/tgl/AppleIntelTGLGraphics.kext" IGPU_EVIDENCE_ROOT="${IGPU_EVIDENCE_ROOT:-${T}/evidence}" \
       IGPU_PANIC_DIR="${T}/panic" IGPU_RECOVERY_MARK="${IGPU_RECOVERY_MARK:-${T}/home/RECOVERY-EFI-VERIFIED.txt}" \
+      IGPU_DRILL_FILE="${IGPU_DRILL_FILE:-${T}/drill.txt}" \
       sh "${FORK}/field/adl-s-field.sh" "$@" > "${T}/out.txt" 2>&1
 }
 reboot_sim() {  # 模拟重启：换开机标识；已写入的 config 在下一次开机生效；运行时状态消失
@@ -307,6 +309,65 @@ echo "== 4 恢复 EFI 未验证：不动现网 =="
 mk; IGPU_RECOVERY_MARK="${T}/none.txt" run; chk "退出非 0" "$([ $? -ne 0 ] && echo y)" y
 chk "config 未变" "$(cfgsha)" "${ORIG_SHA}"
 grep -q 'G4' "${T}/out.txt" && ok "提示门 G4" || no "未提示 G4"
+
+echo "== 4b Windows 恢复演练（门 G4 机器验证）=="
+mk; IGPU_DRILL_FILE="${T}/none.txt" run; chk "没演练：退出非 0" "$([ $? -ne 0 ] && echo y)" y
+chk "没演练：config 未变" "$(cfgsha)" "${ORIG_SHA}"
+has "提示去 Windows 演练" '恢复Mac启动' "${T}/out.txt"
+mk; printf 'live_sha=%s\n' 0000000000000000000000000000000000000000000000000000000000000000 > "${T}/drill.txt"
+run; chk "演练的不是这份 config：退出非 0" "$([ $? -ne 0 ] && echo y)" y
+chk "config 未变" "$(cfgsha)" "${ORIG_SHA}"
+mk; printf 'live_sha=%s\r\n' "$(printf '%s' "${ORIG_SHA}" | tr 'a-f' 'A-F')" > "${T}/drill.txt"
+run; chk "Windows 写的大写哈希 + CRLF 也认" "$?" 0
+
+echo "== 4c Windows 还原后：不许跑 P2，--rollback 能收尾 =="
+mk; to_p1
+cp "${H}/fixture-config.plist" "${T}/ESP/EFI/OC/config.plist"; reboot_sim
+run; chk "Windows 还原后照常运行：拒绝 P2" "$([ $? -ne 0 ] && echo y)" y
+[ ! -f "${T}/accel" ] && ok "GPU 未被动过" || no "P2 被执行了"
+chk "阶段仍 p1-pass（只能回滚）" "$(stage_now)" p1-pass
+has "提示执行 --rollback" '--rollback' "${T}/out.txt"
+run --rollback; chk "--rollback 收尾成功" "$?" 0
+chk "config 是改前版本" "$(cfgsha)" "${ORIG_SHA}"
+[ ! -e "${T}/Extensions/ReimsTGLBoot.kext" ] && ok "kext 已撤出" || no "kext 仍在"
+chk "阶段回到 start" "$(stage_now)" start
+
+echo "== 4d 安全模式（Windows 给 config 加 -x）后回滚 =="
+mk; to_p1
+"${PYBIN}" -c "
+import plistlib,sys
+p=sys.argv[1]; c=plistlib.load(open(p,'rb'))
+s=c['NVRAM']['Add']['7C436110-AB2A-4BBB-A880-FE41995C9F82']; s['boot-args']=s['boot-args']+' -x'
+open(p,'wb').write(plistlib.dumps(c))" "${T}/ESP/EFI/OC/config.plist"
+reboot_sim
+FAKE_BOOTARGS_EXTRA=-x run; chk "安全模式下照常运行：拒绝 P2" "$([ $? -ne 0 ] && echo y)" y
+has "指出安全模式" '安全模式' "${T}/out.txt"
+FAKE_BOOTARGS_EXTRA=-x run --rollback; chk "安全模式下 --rollback 一次完成" "$?" 0
+chk "config 恢复（-x 一并去掉）" "$(cfgsha)" "${ORIG_SHA}"
+[ ! -e "${T}/Extensions/ReimsTGLBoot.kext" ] && ok "kext 已撤出" || no "kext 仍在"
+mk; to_p1
+"${PYBIN}" -c "
+import plistlib,sys
+p=sys.argv[1]; c=plistlib.load(open(p,'rb'))
+s=c['NVRAM']['Add']['7C436110-AB2A-4BBB-A880-FE41995C9F82']; s['boot-args']=s['boot-args']+' -x'; c['Misc']['Boot']['Timeout']=55
+open(p,'wb').write(plistlib.dumps(c))" "${T}/ESP/EFI/OC/config.plist"
+run --rollback; chk "-x 之外还被改过：拒绝覆盖" "$?" 1
+
+echo "== 4e U 盘卷名变了：按脚本位置找 =="
+mk; mkdir -p "${T}/vol/CLONEZILLA 1/igpu-tgl-input" "${T}/vol/CLONEZILLA 1/kit"
+cp -R "${T}/tgl/AppleIntelTGLGraphics.kext" "${T}/vol/CLONEZILLA 1/igpu-tgl-input/"
+cp "${T}/drill.txt" "${T}/vol/CLONEZILLA 1/RECOVERY-DRILL-OK.txt"
+cp -R "${FORK}" "${T}/vol/CLONEZILLA 1/kit/fork"
+env PATH="${B}:${PATH}" FAKE="${T}" FAKE_PY="${PYBIN}" HOME="${T}/home" IGPU_FIELD_ROOT="${T}/root" \
+    IGPU_EXT_DIR="${T}/Extensions" IGPU_PANIC_DIR="${T}/panic" \
+    sh "${T}/vol/CLONEZILLA 1/kit/fork/field/adl-s-field.sh" > "${T}/out.txt" 2>&1
+chk "从“CLONEZILLA 1”运行第 1 步成功" "$?" 0
+ls -d "${T}/vol/CLONEZILLA 1/igpu/results-adl-s-config-"* >/dev/null 2>&1 && ok "证据写进实际的 U 盘" || no "证据没写进 U 盘"
+
+echo "== 4f U 盘没挂上：证据不在系统盘上造假目录 =="
+mk; IGPU_EVIDENCE_ROOT="${T}/not-mounted/igpu" run
+[ ! -e "${T}/not-mounted" ] && ok "没有造出假挂载目录" || no "造出了假挂载目录"
+ls -d "${T}"/root/evidence/results-adl-s-config-* >/dev/null 2>&1 && ok "证据退回 /var/igpu-adl-s/evidence" || no "证据没落地"
 
 echo "== 5 SIP 未生效：不装 kext =="
 mk; run; reboot_sim; FAKE_CSR=00000000 run; chk "退出非 0" "$([ $? -ne 0 ] && echo y)" y
@@ -502,7 +563,11 @@ chk "config 恢复" "$(cfgsha)" "${ORIG_SHA}"
 
 echo "== 14 回滚前核对 config 哈希 =="
 mk; to_p1
-printf '<!-- 用户手改 -->\n' >> "${T}/ESP/EFI/OC/config.plist"; EDITED=$(cfgsha)
+printf '<!-- 用户手改 -->\n' >> "${T}/ESP/EFI/OC/config.plist"
+"${PYBIN}" -c "
+import plistlib,sys
+p=sys.argv[1]; c=plistlib.load(open(p,'rb')); c['Misc']['Boot']['Timeout']=77
+open(p,'wb').write(plistlib.dumps(c))" "${T}/ESP/EFI/OC/config.plist"; EDITED=$(cfgsha)
 run --rollback; chk "config 被改过退出 1" "$?" 1
 chk "被改过的 config 不被覆盖" "$(cfgsha)" "${EDITED}"
 [ ! -e "${T}/Extensions/ReimsTGLBoot.kext" ] && ok "kext 仍已撤出" || no "kext 还在"

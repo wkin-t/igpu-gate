@@ -48,6 +48,10 @@ Ctrl-C、关终端、进程被杀**不算崩溃**：阶段记为 `p2-interrupted
 
 ## 前置
 
+- **门 G4（机器验证）**：在 Windows 里跑过恢复演练，U 盘根目录有 `RECOVERY-DRILL-OK.txt`，且其中 `live_sha` 等于第 1 步将要修改的 config 哈希；否则第 1 步拒绝。另需 `~/RECOVERY-EFI-VERIFIED.txt`（由 U 盘上的 `go.sh` 在见到演练凭证后自动写入）。
+- 交换盘根目录按脚本所在位置往上找含 `igpu-tgl-input/` 的目录，不写死 `/Volumes/CLONEZILLA`（卷名可能变成 `CLONEZILLA 1`）。交换盘没挂上时证据落到 `/var/igpu-adl-s/evidence`，不会在系统盘上造出假的挂载目录。
+- P2 开跑前再核对一次部署状态（csr、`-allow3d`、隔离、非安全模式），不符就拒绝并提示 `--rollback`：防止在 Windows 里还原过 config 后照常运行把 P2 跑在未隔离的 GPU 上。
+- 回滚接受“本工具增量 + Windows 恢复工具加的 `-x`”这一已知变体（`oc_delta.py verify --tolerate-safe-boot`），安全模式下一次 `--rollback` 即可撤 kext 并还原 config。
 - 恢复 EFI 已人工验证：`echo ok > ~/RECOVERY-EFI-VERIFIED.txt`（门 G4，否则第 1 步拒绝）。
 - 本地合法取得的 `AppleIntelTGLGraphics.kext`（16.0.0），默认放在 `/Volumes/CLONEZILLA/igpu-tgl-input/`，可用 `IGPU_TGL_INPUT` 覆盖。仓库不包含、也不分发它。
 - `prebuilt/`：CI 产物 `adl-s-prebuilt`（ManualActivation kext、control、收据），放在仓库根下。
