@@ -238,6 +238,7 @@ case "$1" in
           : > "${FAKE}/aux-next-present"; rm -f "${FAKE}/aux-next-absent"
         else
           : > "${FAKE}/aux-next-absent"; rm -f "${FAKE}/aux-next-present"
+          [ -n "${FAKE_REBUILD_REMOVES_AUX_KC:-}" ] && rm -f "${FAKE}/collections/AuxiliaryKernelExtensions.kc"
         fi ;;
       27) echo 'User approval is required.' ;;
       *) echo 'Auxiliary collection rebuild request failed.' ;;
@@ -254,6 +255,7 @@ case "$1" in
   inspect)
     if [ "${2:-}" = "--help" ]; then printf 'USAGE: kmutil inspect <options>\n-A, --auxiliary-path <auxiliary-path>\n--show-kext-uuids\n'; exit 0; fi
     [ "$#" -eq 4 ] && [ "$2" = "--show-kext-uuids" ] && [ "$3" = "-A" ] || { echo "Unknown option '${2:-}'"; exit 64; }
+    [ -f "$4" ] || { echo "No such file or directory: $4"; exit 66; }
     [ -n "${FAKE_DISK_AUX_RC:-}" ] && exit "${FAKE_DISK_AUX_RC}"
     printf 'No variant specified, falling back to release\nauxiliary kernel collection at %s (BBBB0000-0000-0000-0000-000000000002):\nExtension Information:\n' "$4"
     printf 'com.apple.driver.HighPointIOP\t1.0\t/Library/Extensions/HighPointIOP.kext\t(CCCC0000-0000-0000-0000-000000000009)\n'
@@ -273,6 +275,8 @@ case "$1" in
         if [ -f "${FAKE}/aux-current-present" ] || [ -n "${FAKE_AUX_STALE:-}" ]; then
           echo '  1 0 0 0 0 com.apple.driver.AppleIntelTGLGraphics (16.0.3) BBBB0000-0000-0000-0000-000000000002 <1>'
           echo '  2 0 0 0 0 lab.reims.ReimsADLManualActivation (0.2.2) AAAA0000-0000-0000-0000-000000000001 <1>'
+        elif [ -n "${FAKE_AUX_OTHER:-}" ]; then
+          echo '  3 0 0 0 0 com.apple.driver.Other (1.0) CCCC0000-0000-0000-0000-000000000009 <1>'
         fi
         exit 0 ;;
       *) exit 64 ;;
@@ -293,8 +297,15 @@ esac
 EOS
   cat > "${B}/ditto" <<'EOS'
 #!/bin/sh
-while [ "${1#--}" != "$1" ]; do shift; done
-mkdir -p "$(dirname "$2")" && cp -R "$1" "$2"
+_norsrc=0
+while [ "${1#--}" != "$1" ]; do
+  [ "$1" = "--norsrc" ] && _norsrc=1
+  shift
+done
+mkdir -p "$(dirname "$2")" && cp -R "$1" "$2" || exit 1
+if [ "${_norsrc}" -eq 1 ]; then
+  find "$2" -name '._*' -type f -exec rm -f {} + 2>/dev/null
+fi
 EOS
   cat > "${B}/log" <<'EOS'
 #!/bin/sh
@@ -575,6 +586,45 @@ review_regressions() {
   cp "${H}/fixture-config.plist" "${ESP}/EFI/OC/config.plist"; reboot_sim
   run --status
   has "p2-interrupted回退config后status报recovery-needed" 'observed_state=recovery-needed' "${T}/out.txt"
+
+  # F11: FAT32 交换盘 prebuilt 出现 AppleDouble ._* / .DS_Store 时，do_install 必须用清洗后的 root 副本且复核收据
+  mk; run; reboot_sim
+  printf 'appledouble' > "${FORK}/prebuilt/ReimsADLManualActivation.kext/Contents/._Info.plist"
+  printf 'dsstore' > "${FORK}/prebuilt/ReimsADLManualActivation.kext/Contents/.DS_Store"
+  run; chk "FAT32 prebuilt含._*与.DS_Store时仍可干净安装" "$?" 0
+  [ ! -e "${EXT}/ReimsADLManualActivation.kext/Contents/.DS_Store" ] \
+    && [ ! -e "${EXT}/ReimsADLManualActivation.kext/Contents/._Info.plist" ] \
+    && ok "安装到Extensions的控制器包无FAT32碎片" || no "FAT32碎片污染了Extensions控制器包"
+  mk; run; reboot_sim
+  printf 'tampered-gate' > "${FORK}/prebuilt/ReimsADLManualActivation.kext/Contents/MacOS/ReimsADLManualActivation"
+  run; chk "第2步发现prebuilt二进制被篡改：拒绝安装" "$?" 1
+  [ ! -e "${EXT}/ReimsADLManualActivation.kext" ] && [ ! -e "${EXT}/ReimsTGLBoot.kext" ] \
+    && ok "篡改prebuilt未写入Extensions" || no "篡改prebuilt写入了Extensions"
+
+  # F12: kmutil rebuild 在无已批准第三方扩展时移除 AuxiliaryKernelExtensions.kc，跨新Boot核验须通过；但内核仍有活跃AuxKC时须拦截
+  mk; run; reboot_sim
+  printf 'install-failed\n' > "${T}/root/STAGE"
+  : > "${T}/root/KMUTIL_DIRTY"
+  FAKE_REBUILD_REMOVES_AUX_KC=1 run --rollback; chk "移除AuxKC的rebuild请求发出" "$?" 0
+  [ ! -e "${T}/collections/AuxiliaryKernelExtensions.kc" ] && ok "桩已模拟rebuild删除AuxKC文件" || no "桩未删除AuxKC"
+  reboot_sim; FAKE_AUX_OTHER=1 run; chk "磁盘无AuxKC但内核仍有活跃Aux组件：拒绝放行" "$?" 1
+  chk "不一致状态停在rollback-incomplete" "$(stage_now)" rollback-incomplete
+  mk; run; reboot_sim
+  printf 'install-failed\n' > "${T}/root/STAGE"
+  : > "${T}/root/KMUTIL_DIRTY"
+  FAKE_REBUILD_REMOVES_AUX_KC=1 run --rollback
+  reboot_sim; run; chk "磁盘无AuxKC且新Boot有效Aux为空：允许还原config" "$?" 0
+  chk "进入rollback-final-reboot" "$(stage_now)" rollback-final-reboot
+  reboot_sim; run; chk "最终基线核验通过并回到start" "$?" 0
+  chk "阶段回到start" "$(stage_now)" start
+  run --rollback; chk "无AuxKC文件的干净基线重复rollback幂等通过" "$?" 0
+  chk "无AuxKC文件的干净基线重复rollback仍在start" "$(stage_now)" start
+
+  # F13: do_config 不从世界可写交换盘直接以 root 执行 prepare-deferred-runtime.py，且不在交换盘生成 __pycache__
+  mk
+  rm -rf "${FORK}/desktop-manual-20260917/fix/__pycache__"
+  run; chk "第1步从root副本执行补丁预检通过" "$?" 0
+  [ ! -e "${FORK}/desktop-manual-20260917/fix/__pycache__" ] && ok "交换盘未残留__pycache__" || no "交换盘残留了__pycache__"
 }
 
 if [ "${1:-}" = "--review-only" ]; then

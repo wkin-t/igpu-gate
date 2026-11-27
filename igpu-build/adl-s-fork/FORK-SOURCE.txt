@@ -1,4 +1,4 @@
 repo=https://github.com/wkin-t/IntelIGPU-Tahoe
 branch=adl-s
-commit=2aa966b13e12613723bf300b8e448e8dbe9fa94e
+commit=a2dd0715ec8f3556229176e4a0661f02d5f95ee0
 prebuilt_run=45973861159

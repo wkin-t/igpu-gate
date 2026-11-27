@@ -16,6 +16,7 @@
 #
 # 一律写 ${VAR}：macOS bash 3.2 会把紧邻的中文字节并进变量名（set -u 下直接退出）。
 set -u
+export PYTHONDONTWRITEBYTECODE=1
 
 SELF=$0
 FIELD_DIR=$(cd "$(dirname "$0")" && pwd -P)
@@ -435,7 +436,9 @@ do_config() {
 
   "${PY}" "${TOOLS}/field_check.py" tgl-input "${TGL_INPUT}" >> "${EV}/transcript.txt" 2>&1 \
     || die "TGL 原料不对或缺失：${TGL_INPUT}"
-  capture tgl-check.json "${PY}" "${FORK_SRC}/${FIX_REL}/prepare-deferred-runtime.py" --check-only "${TGL_INPUT}" \
+  cp "${FORK_SRC}/${FIX_REL}/prepare-deferred-runtime.py" "${TOOLS}/prepare-deferred-runtime.py" \
+    && secure_tree "${TOOLS}" || die "无法准备补丁校验脚本副本"
+  capture tgl-check.json "${PY}" "${TOOLS}/prepare-deferred-runtime.py" --check-only "${TGL_INPUT}" \
     || die "TGL 原料未通过结构断言（详见 tgl-check.json）"
   log "TGL 原料结构断言通过（含 probe 比较链：0x46808086 → SKU 2）"
   for _f in "${PREBUILT}/${GATE_NAME}/Contents/Info.plist" "${PREBUILT}/control" "${PREBUILT}/manual-gate-current.json"; do
@@ -621,23 +624,29 @@ do_install() {
   find "${_fork}" "${_input}" -name '.DS_Store' -type f -exec rm -f {} + 2>/dev/null
 
   _fix="${_fork}/${FIX_REL}"
-  cp "${PREBUILT}/manual-gate-current.json" "${_fix}/manual-gate-current.json" || die "写收据失败"
-  cp "${PREBUILT}/control" "${_fix}/manual-gate/control" || die "写控制工具失败"
+  _prebuilt="${_fork}/prebuilt"
+  for _f in "${_prebuilt}/${GATE_NAME}/Contents/Info.plist" "${_prebuilt}/control" "${_prebuilt}/manual-gate-current.json"; do
+    [ -f "${_f}" ] || die "缺预编译产物：${_f}"
+  done
+  cp "${_prebuilt}/manual-gate-current.json" "${_fix}/manual-gate-current.json" || die "写收据失败"
+  cp "${_prebuilt}/control" "${_fix}/manual-gate/control" || die "写控制工具失败"
   secure_tree "${_fork}" || die "收回工作副本写权限失败（${_fork}）"
   secure_tree "${_input}" || die "收回 TGL 工作副本写权限失败（${_input}）"
   chmod 755 "${_fix}/manual-gate/control" || die "chmod 控制工具失败"
+  "${PY}" "${TOOLS}/field_check.py" receipt "${_prebuilt}/${GATE_NAME}" "${_prebuilt}/manual-gate-current.json" \
+    >> "${EV}/transcript.txt" 2>&1 || die "预编译 kext 与收据不符（kext 未安装）"
   capture prepare.json "${PY}" "${_fix}/prepare-deferred-runtime.py" "${_input}" \
     || die "打补丁失败（kext 未安装，详见 prepare.json）"
   secure_tree "${_fork}" || die "收回工作副本写权限失败（${_fork}）"
   _rt_cand_uuid=$("${PY}" "${TOOLS}/field_check.py" json-field "${_fix}/deferred-runtime.json" candidate_uuid 2>/dev/null) \
     || die "读不到运行时候选 UUID"
-  _gate_cand_uuid=$("${PY}" "${TOOLS}/field_check.py" json-field "${PREBUILT}/manual-gate-current.json" uuid 2>/dev/null) \
+  _gate_cand_uuid=$("${PY}" "${TOOLS}/field_check.py" json-field "${_prebuilt}/manual-gate-current.json" uuid 2>/dev/null) \
     || die "读不到控制器候选 UUID"
   capture runtime-info-check.txt "${PY}" "${TOOLS}/field_check.py" write-receipt \
     "${_fix}/ReimsTGLManualRuntime.kext" "${_rt_cand_uuid}" "${EV}/staged-runtime-receipt.json" --empty-personalities \
     || die "运行时元数据不符或自动 personality 没清空，未安装"
   capture gate-receipt-stage.txt "${PY}" "${TOOLS}/field_check.py" write-receipt \
-    "${PREBUILT}/${GATE_NAME}" "${_gate_cand_uuid}" "${EV}/staged-gate-receipt.json" \
+    "${_prebuilt}/${GATE_NAME}" "${_gate_cand_uuid}" "${EV}/staged-gate-receipt.json" \
     || die "生成控制器安装收据失败，未安装"
   log "TGL 运行时已生成并签名"
 
@@ -651,7 +660,7 @@ do_install() {
   sync
   STEP=install
   if ! ditto --norsrc --noextattr --noqtn "${_fix}/ReimsTGLManualRuntime.kext" "${EXT_DIR}/${RUNTIME_NAME}" 2>"${EV}/ditto-rt.err" \
-     || ! ditto --norsrc --noextattr --noqtn "${PREBUILT}/${GATE_NAME}" "${EXT_DIR}/${GATE_NAME}" 2>"${EV}/ditto-gate.err"; then
+     || ! ditto --norsrc --noextattr --noqtn "${_prebuilt}/${GATE_NAME}" "${EXT_DIR}/${GATE_NAME}" 2>"${EV}/ditto-gate.err"; then
     _cp_wk=yes
     if ! withdraw_kexts copy-failed; then _cp_wk=no; fi
     : > "${KMUTIL_DIRTY}"
@@ -1090,6 +1099,43 @@ rollback_stop() {
   die "$1；为防卡开机不恢复 config（SIP 保持放宽），不清备份或 DIRTY。把证据带回，不无限重复同一失败命令。"
 }
 
+verify_disk_aux_absent() {  # verify_disk_aux_absent <disk_out_name> <aux_all_name>
+  DISK_AUX_ERR=""
+  DISK_AUX_MODE=""
+  _vda_dir=$(dirname "${AUX_KC}")
+  if [ -L "${AUX_KC}" ] || [ -L "${_vda_dir}" ] || [ ! -d "${_vda_dir}" ]; then
+    DISK_AUX_ERR="AuxKC 目录缺失或含符号链接：${AUX_KC}"
+    return 1
+  fi
+  if [ ! -e "${AUX_KC}" ]; then
+    # 无已批准第三方扩展时 kernelmanagerd 可能不保留 AuxiliaryKernelExtensions.kc；
+    # 必须同时确认目录可读且本次启动内核无任何可用 AuxKC 组件，防旧 Preboot/未采用状态误放行。
+    capture "$1" ls -la "${_vda_dir}" || { DISK_AUX_ERR="无法读取 AuxKC 目录：${_vda_dir}"; return 1; }
+    _vda_empty=$("${PY}" "${TOOLS}/field_check.py" empty-loaded "${EV}/$2" 2>&1) || {
+      DISK_AUX_ERR="磁盘无 AuxKC 文件，但有效 AuxKC 清单无法确认（${_vda_empty}）"
+      return 1
+    }
+    if [ "$(kv "${_vda_empty}" loaded_empty)" != "yes" ]; then
+      DISK_AUX_ERR="磁盘无 ${AUX_KC}，但本次启动仍有可用 AuxKC 组件，拒绝判定已排除"
+      return 1
+    fi
+    DISK_AUX_MODE=collection-absent
+    return 0
+  fi
+  capture "$1" kmutil inspect --show-kext-uuids -A "${AUX_KC}" || { DISK_AUX_ERR="磁盘 AuxKC 查询失败"; return 1; }
+  _vda_pd=$("${PY}" "${TOOLS}/field_check.py" absent "${EV}/$1" inspect "${TGL_ID}" "${GATE_ID}" --collection-path "${AUX_KC}" 2>&1) || {
+    DISK_AUX_ERR="磁盘集合排除解析失败（${_vda_pd}）"
+    return 1
+  }
+  printf '%s\n' "${_vda_pd}" >> "${EV}/rollback-checks.txt"
+  if [ "$(kv "${_vda_pd}" identifiers_absent)" != "yes" ]; then
+    DISK_AUX_ERR="磁盘集合排除证据不足（${_vda_pd}）"
+    return 1
+  fi
+  DISK_AUX_MODE=inspected
+  return 0
+}
+
 already_at_clean_baseline() {
   BASELINE_ESP_BAD=""
   [ "$(stage)" = "start" ] || return 1
@@ -1097,13 +1143,11 @@ already_at_clean_baseline() {
   ! ext_present "${EXT_DIR}/${GATE_NAME}" && ! ext_present "${EXT_DIR}/${RUNTIME_NAME}" || return 1
   capture baseline-aux-all.txt kmutil showloaded --collection aux --show all || return 1
   capture baseline-running.txt kmutil showloaded || return 1
-  capture baseline-disk.txt kmutil inspect --show-kext-uuids -A "${AUX_KC}" || return 1
   _ba=$("${PY}" "${TOOLS}/field_check.py" absent "${EV}/baseline-aux-all.txt" loaded "${TGL_ID}" "${GATE_ID}" 2>&1) || return 1
   [ "$(kv "${_ba}" identifiers_absent)" = "yes" ] || return 1
   _br=$("${PY}" "${TOOLS}/field_check.py" absent "${EV}/baseline-running.txt" loaded "${TGL_ID}" "${GATE_ID}" 2>&1) || return 1
   [ "$(kv "${_br}" identifiers_absent)" = "yes" ] || return 1
-  _bd=$("${PY}" "${TOOLS}/field_check.py" absent "${EV}/baseline-disk.txt" inspect "${TGL_ID}" "${GATE_ID}" --collection-path "${AUX_KC}" 2>&1) || return 1
-  [ "$(kv "${_bd}" identifiers_absent)" = "yes" ] || return 1
+  verify_disk_aux_absent baseline-disk.txt baseline-aux-all.txt || return 1
   capture baseline-csr.plist nvram -x csr-active-config || return 1
   _bc=$("${PY}" "${TOOLS}/field_check.py" nvdata "${EV}/baseline-csr.plist" csr-active-config 2>&1) || return 1
   [ "$(kv "${_bc}" csr-active-config)" = "00000000" ] || return 1
@@ -1235,7 +1279,6 @@ finish_rollback() {
   capture rollback-aux-all.txt kmutil showloaded --collection aux --show all \
     || rollback_stop "AuxKC 可用组件查询失败"
   capture rollback-running.txt kmutil showloaded || rollback_stop "内存组件查询失败"
-  capture rollback-disk.txt kmutil inspect --show-kext-uuids -A "${AUX_KC}" || rollback_stop "磁盘 AuxKC 查询失败"
   for _proof in rollback-aux-all.txt rollback-running.txt; do
     _pv=$("${PY}" "${TOOLS}/field_check.py" absent "${EV}/${_proof}" loaded "${TGL_ID}" "${GATE_ID}" 2>&1) \
       || rollback_stop "集合/内存排除解析失败：${_proof}（${_pv}）"
@@ -1243,10 +1286,7 @@ finish_rollback() {
     [ "$(kv "${_pv}" identifiers_absent)" = "yes" ] \
       || rollback_stop "集合/内存排除证据不足：${_proof}（${_pv}）"
   done
-  _pd=$("${PY}" "${TOOLS}/field_check.py" absent "${EV}/rollback-disk.txt" inspect "${TGL_ID}" "${GATE_ID}" --collection-path "${AUX_KC}" 2>&1) \
-    || rollback_stop "磁盘集合排除解析失败（${_pd}）"
-  printf '%s\n' "${_pd}" >> "${EV}/rollback-checks.txt"
-  [ "$(kv "${_pd}" identifiers_absent)" = "yes" ] || rollback_stop "磁盘集合排除证据不足（${_pd}）"
+  verify_disk_aux_absent rollback-disk.txt rollback-aux-all.txt || rollback_stop "${DISK_AUX_ERR}"
   # 标准 rebuild 按仍存在的安装源评估；源码已撤出且新启动/磁盘均排除后，不擅自清全局 staging/政策数据库。
   capture kernelmanagerd-after-rollback.txt command log show --last boot --style compact \
     --predicate 'process == "kernelmanagerd" OR process == "syspolicyd"'
@@ -1255,6 +1295,7 @@ finish_rollback() {
   summary "effective_aux_absent=yes"
   summary "running_absent=yes"
   summary "disk_aux_absent=yes"
+  summary "disk_aux_mode=${DISK_AUX_MODE}"
   rollback_config || rollback_stop "config 还原核验失败"
   unmount_esp
   record_boot

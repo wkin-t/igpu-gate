@@ -402,6 +402,17 @@ def cmd_loaded(args):
         print("loaded=wrong-uuid")
 
 
+def cmd_empty_loaded(args):
+    try:
+        text = pathlib.Path(args.showloaded).read_text(encoding="utf-8")
+        records = loaded_records(text)
+    except (OSError, ValueError) as exc:
+        print("loaded_empty=unknown")
+        fail(f"无法确认加载清单为空：{exc}")
+    print("loaded_empty=" + ("yes" if not records else "no"))
+
+
+
 def inspect_identifiers(text):
     # 仅解析有计数和尺寸边界的完整 fileset；这不是命令成功、批准或 KC 已采用的证明。
     lines = [line.strip() for line in text.splitlines() if line.strip()]
@@ -723,6 +734,7 @@ def main():
     p = sub.add_parser("receipt"); p.add_argument("bundle"); p.add_argument("receipt"); p.add_argument("--allow-partial", action="store_true"); p.set_defaults(run=cmd_receipt)
     p = sub.add_parser("write-receipt"); p.add_argument("bundle"); p.add_argument("uuid"); p.add_argument("out"); p.add_argument("--empty-personalities", action="store_true"); p.set_defaults(run=cmd_write_receipt)
     p = sub.add_parser("loaded"); p.add_argument("showloaded"); p.add_argument("identifier"); p.add_argument("uuid"); p.set_defaults(run=cmd_loaded)
+    p = sub.add_parser("empty-loaded"); p.add_argument("showloaded"); p.set_defaults(run=cmd_empty_loaded)
     p = sub.add_parser("absent"); p.add_argument("file"); p.add_argument("kind", choices=("loaded", "inspect")); p.add_argument("identifiers", nargs=2); p.add_argument("--collection-path"); p.set_defaults(run=cmd_absent)
     p = sub.add_parser("controller"); p.add_argument("plist"); p.set_defaults(run=cmd_controller)
     p = sub.add_parser("json-field"); p.add_argument("json"); p.add_argument("field"); p.set_defaults(run=cmd_json_field)

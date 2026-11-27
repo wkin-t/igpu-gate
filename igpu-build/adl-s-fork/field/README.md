@@ -32,8 +32,8 @@ sudo sh field/adl-s-field.sh --rollback
 
 ## 阶段含义
 
-1. `start`：核对系统版本与目标卷 UUID、物理身份、GFX0 完整路径、恢复凭证、原料与预编译收据；备份并写入 OC 增量。随后重启。
-2. `config-applied`：在替换工作树或生成运行时前先确认无旧脏标记、无目标目录/残留链接；核对当前版本、系统卷、SIP、隔离和组件旧状态；在 root 专属副本生成运行时与不可变完整包装收据（覆盖可执行文件、`Info.plist` 与精确文件集合），写入复制标记后将两包复制到扩展目录并请求装载：
+1. `start`：核对系统版本与目标卷 UUID、物理身份、GFX0 完整路径、恢复凭证、原料与预编译收据（校验脚本复制到 root 专属目录执行且禁用 `.pyc` 写入交换盘）；备份并写入 OC 增量。随后重启。
+2. `config-applied`：在替换工作树或生成运行时前先确认无旧脏标记、无目标目录/残留链接；核对当前版本、系统卷、SIP、隔离和组件旧状态；在清洗 AppleDouble/Finder 碎片后的 root 专属副本中复核预编译控制器收据、生成运行时与不可变完整包装收据（覆盖可执行文件、`Info.plist` 与精确文件集合），写入复制标记后将两包从 root 副本复制到扩展目录并请求装载：
 
    ```sh
    kmutil load --load-style start-only -p /Library/Extensions/ReimsTGLBoot.kext -p /Library/Extensions/ReimsADLManualActivation.kext
@@ -53,7 +53,7 @@ sudo sh field/adl-s-field.sh --rollback
 - 先按完整收据核对安装源归属（可执行文件、`Info.plist` 元数据及包内文件集），逐包移出到本地备份，不删除。陌生同名包、改过包装的包或撤出失败必须停止恢复配置。
 - 前台运行 `kmutil rebuild`，确认问题可见，原始退出码独立保存，不拿 `tee` 的退出码代替。
 - `27` 为 `rollback-awaiting-approval`；`0/28` 为 `rollback-pending-reboot`。同一 Boot 重跑只提示，不重复请求。config、BACKUP、DIRTY 保留。
-- 新的 Tahoe Boot 里，验证安装源不再出现、AuxKC 可用组件、未过滤内存清单、指定磁盘 AuxKC 均排除两份目标的任何版本，Boot/System 集合指纹未变化。任一查询失败、未知格式、旧版本残留或目标卷改变都是 incomplete。
+- 新的 Tahoe Boot 里，验证安装源不再出现、AuxKC 可用组件、未过滤内存清单、指定磁盘 AuxKC 均排除两份目标的任何版本（若无已批准第三方扩展导致 `kernelmanagerd` 移除磁盘 `AuxiliaryKernelExtensions.kc`，须同时验证目录可读且本次启动内核无任何可用 AuxKC 组件），Boot/System 集合指纹未变化。任一查询失败、未知格式、旧版本残留或目标卷改变都是 incomplete。
 - 排除证据成立后才还原基线 config（若缺失备份记录则必须核实现网 ESP `delta=absent`，拒绝假称已还原），进入 `rollback-final-reboot`。再经同一 OC 启动，验证 NVRAM、`kern.safeboot=0`、实际设备/实例、当前 config 哈希、Boot/System 指纹、AuxKC/内存排除和启动来源（若 NVRAM 含 `boot-path` 必须与记录 ESP 一致；基线 `ExposeSensitiveData=6` 未发布 `boot-path` 时诚实记为 `boot_source=unverified-no-bootpath`，不静默修改 `ExposeSensitiveData`）后，才标记回滚完成并清恢复记录。幂等基线检查同样核对现网 ESP `delta=absent`。
 
 不全局清 StagedExtensions/KextPolicy。标准 rebuild 按已移走的安装源评估；在新启动、磁盘和内存排除成立前，不能把保留的 staging 副本说成已净化。历史缓存痕迹也不必物理删光；未决加入或无法分类时继续留证/停止。

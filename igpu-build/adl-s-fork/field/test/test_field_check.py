@@ -145,6 +145,26 @@ class AbsentLoadedTests(unittest.TestCase):
         self.assert_result("", "unknown", status=1, read_error=OSError("fixture unreadable"))
 
 
+class EmptyLoadedTests(unittest.TestCase):
+    def assert_empty(self, text, result, status=0, **fixture):
+        actual_status, output, _ = invoke("empty-loaded", "fixture.txt", text=text, **fixture)
+        self.assertEqual((actual_status, output), (status, "loaded_empty=" + result))
+
+    def test_explicit_empty_header_and_preamble_are_empty(self):
+        self.assert_empty(LOADED_HEADER, "yes")
+        self.assert_empty("No variant specified, falling back to release\n" + LOADED_HEADER, "yes")
+
+    def test_any_record_is_not_empty(self):
+        self.assert_empty(LOADED_HEADER + OTHER_LINE, "no")
+
+    def test_blank_or_error_output_is_unknown(self):
+        for text in ("", " \r\n", "Unknown option\n", LOADED_HEADER + "3 0 truncated\n"):
+            with self.subTest(text=text):
+                self.assert_empty(text, "unknown", status=1)
+        self.assert_empty("", "unknown", status=1, read_error=OSError("unreadable"))
+
+
+
 # 人工 Mach-O fileset 字面夹具；命令数、总尺寸和每个 entry 的边界明确，非 kmutil 真机输出。
 INSPECT_OTHER = """Mach header
 magic cputype cpusubtype caps filetype ncmds sizeofcmds flags
