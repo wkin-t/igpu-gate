@@ -12,7 +12,7 @@ permissions:
 
 jobs:
   build-and-test:
-    # Same build as the target system (Tahoe 25G83), Xcode 26.x, SDK 26.5.
+    # hosted runner 为 ARM 且可能比目标更新；必须记录实际版本，CI 不等于 Intel 25G83 真机验证。
     runs-on: macos-26
     timeout-minutes: 30
     steps:
@@ -23,6 +23,34 @@ jobs:
           sw_vers
           xcodebuild -version
           xcrun --sdk macosx --show-sdk-version
+
+      - name: Read-only kmutil contract and output samples
+        run: |
+          set -euo pipefail
+          out="$RUNNER_TEMP/kmutil-contract"
+          mkdir -p "$out"
+          for sub in load rebuild inspect showloaded; do
+            kmutil "$sub" --help > "$out/$sub-help.txt" 2>&1
+            cat "$out/$sub-help.txt"
+          done
+          man kmutil | col -b > "$out/kmutil-man.txt"
+          kmutil showloaded --collection aux --show all > "$out/aux-all.txt" 2>&1
+          kmutil showloaded > "$out/running.txt" 2>&1
+          set +e
+          kmutil inspect --show-kext-uuids > "$out/inspect-uuids.txt" 2>&1
+          echo "$?" > "$out/inspect-uuids.rc"
+          kmutil inspect --show-fileset-entries > "$out/inspect-filesets.txt" 2>&1
+          echo "$?" > "$out/inspect-filesets.rc"
+          set -e
+          echo "Read-only samples only; no kext installed and no collection rebuilt."
+
+      - name: Upload read-only kmutil contract
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: kmutil-cli-contract
+          path: ${{ runner.temp }}/kmutil-contract/
+          if-no-files-found: error
 
       - name: No Apple binaries or machine identifiers in the tree
         run: |
@@ -44,7 +72,9 @@ jobs:
           exit "$found"
 
       - name: Python and unit tests
-        run: bash scripts/test.sh
+        run: |
+          bash scripts/test.sh
+          PYTHONDONTWRITEBYTECODE=1 python3 -B -m unittest discover -s field/test -p "test_*.py" -v
 
       - name: Prepare script rejects unknown input without writing
         run: |

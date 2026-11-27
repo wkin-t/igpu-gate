@@ -1,11 +1,12 @@
 #!/bin/bash
-# run-field.sh —— adl-s-field.sh 的离线仿真（桩命令模拟 macOS，不需要 Apple 二进制）
+# run-field.sh —— adl-s-field.sh 的离线仿真（四层独立桩模拟 macOS，不需要 Apple 二进制）
 #
-# 覆盖：完整推进 start→p2-pass、未重启续跑必须停、回滚（先撤 kext、每步失败继续、
-#       rollback-incomplete、哈希核对、按分区 UUID 找 ESP）、设备不符/路径不符/未验证恢复 EFI/
-#       SIP 未生效 时不动现网、kmutil 失败自动撤出、P1 失败、P2 失败（probe 失败与 start 卡住分开）、
-#       [IGPU] 全量分类、P2 崩溃按时间过滤证据、Ctrl-C 与崩溃分开、信号 trap、--status 走 sudo、
-#       工作副本权限、csr 取值、补丁控制流断言。
+# 覆盖：完整推进 start→p2-pass、未重启续跑必须停、回滚（四层独立核验、先撤 kext、每步失败继续、
+#       rollback-incomplete、哈希核对、按分区 UUID 与 boot-path 核验 ESP）、设备不符/路径不符/
+#       未验证恢复 EFI/SIP 未生效 时不动现网、kmutil 0/27/28/失败分支、旧 DIRTY 受控恢复、
+#       完整包装收据与中断复制标记、P1 精确身份+控制器服务、P2 前置查询退出码门禁、
+#       [IGPU] 全量分类、P2 崩溃按时间过滤证据、Ctrl-C 与崩溃分开、信号 trap、--status 实际观察、
+#       工作副本权限、csr 取值、补丁控制流断言、中文邻接变量门禁。
 set -u
 H=$(cd "$(dirname "$0")" && pwd)
 FIELD=$(cd "${H}/.." && pwd)
@@ -21,45 +22,64 @@ PYBIN=$(command -v python3 2>/dev/null || command -v python)
 REAL_MV=$(command -v mv)
 sha() { if command -v shasum >/dev/null 2>&1; then shasum -a 256 "$1" | awk '{print $1}'; else sha256sum "$1" | awk '{print $1}'; fi; }
 ESP_UUID=11111111-2222-4333-8444-555555555555
+SUITE_ROOT=$(mktemp -d 2>/dev/null || mktemp -d -t fieldsuite)
+trap 'rm -rf "${SUITE_ROOT}"' EXIT
+B="${SUITE_ROOT}/bin"
+TPL="${SUITE_ROOT}/tpl"
+T=""
 
-mk() {
-  T=$(mktemp -d 2>/dev/null || mktemp -d -t fieldsim)
-  B="${T}/bin"; ESP="${T}/ESP"; FORK="${T}/fork"; EXT="${T}/Extensions"
-  mkdir -p "${B}" "${ESP}/EFI/OC" "${EXT}" "${T}/home" "${T}/panic" \
-           "${FORK}/field" "${FORK}/prebuilt/ReimsADLManualActivation.kext/Contents/MacOS" \
-           "${FORK}/desktop-manual-20260917/fix/manual-gate" "${T}/tgl/AppleIntelTGLGraphics.kext/Contents/MacOS"
-  cp "${SCRIPT}" "${FIELD}/oc_delta.py" "${FIELD}/field_check.py" "${FORK}/field/"
-  cp "${H}/fixture-config.plist" "${ESP}/EFI/OC/config.plist"
-  ORIG_SHA=$(sha "${ESP}/EFI/OC/config.plist")
-  echo ok > "${T}/home/RECOVERY-EFI-VERIFIED.txt"
-  printf 'time=2026-11-09T09:00:00\nlive_sha=%s\n' "${ORIG_SHA}" > "${T}/drill.txt"
-  echo boot-1 > "${T}/bootid"
-  printf 'gate-binary' > "${FORK}/prebuilt/ReimsADLManualActivation.kext/Contents/MacOS/ReimsADLManualActivation"
-  printf '<plist version="1.0"><dict/></plist>\n' > "${FORK}/prebuilt/ReimsADLManualActivation.kext/Contents/Info.plist"
-  printf 'control' > "${FORK}/prebuilt/control"
-  "${PYBIN}" - "${FORK}/prebuilt" <<'EOP'
-import hashlib, json, pathlib, sys
+init_suite_assets() {
+  mkdir -p "${B}" "${TPL}/ESP/EFI/OC" "${TPL}/home" "${TPL}/collections" \
+           "${TPL}/fork/field" "${TPL}/fork/prebuilt/ReimsADLManualActivation.kext/Contents/MacOS" \
+           "${TPL}/fork/desktop-manual-20260917/fix/manual-gate" \
+           "${TPL}/tgl/AppleIntelTGLGraphics.kext/Contents/MacOS"
+  cp "${SCRIPT}" "${FIELD}/oc_delta.py" "${FIELD}/field_check.py" "${TPL}/fork/field/"
+  cp "${H}/fixture-config.plist" "${TPL}/ESP/EFI/OC/config.plist"
+  ORIG_SHA=$(sha "${TPL}/ESP/EFI/OC/config.plist")
+  echo ok > "${TPL}/home/RECOVERY-EFI-VERIFIED.txt"
+  printf 'time=2026-11-09T09:00:00\nlive_sha=%s\n' "${ORIG_SHA}" > "${TPL}/drill.txt"
+  echo boot-1 > "${TPL}/bootid"
+  printf 'fixture boot collection' > "${TPL}/collections/BootKernelExtensions.kc"
+  printf 'fixture system collection' > "${TPL}/collections/SystemKernelExtensions.kc"
+  printf 'fixture auxiliary collection' > "${TPL}/collections/AuxiliaryKernelExtensions.kc"
+  printf 'gate-binary' > "${TPL}/fork/prebuilt/ReimsADLManualActivation.kext/Contents/MacOS/ReimsADLManualActivation"
+  "${PYBIN}" - "${TPL}/fork/prebuilt" "${TPL}/tgl/AppleIntelTGLGraphics.kext/Contents/Info.plist" <<'EOP'
+import hashlib, json, pathlib, plistlib, sys
 b = pathlib.Path(sys.argv[1]); k = b / "ReimsADLManualActivation.kext"
+(k / "Contents/Info.plist").write_bytes(plistlib.dumps({
+    "CFBundleIdentifier": "lab.reims.ReimsADLManualActivation",
+    "CFBundleVersion": "0.2.2",
+}))
 h = {r: hashlib.sha256((k / r).read_bytes()).hexdigest() for r in ("Contents/MacOS/ReimsADLManualActivation", "Contents/Info.plist")}
-(b / "manual-gate-current.json").write_text(json.dumps({"identifier": "lab.reims.ReimsADLManualActivation", "uuid": "AAAA0000-0000-0000-0000-000000000001", "hashes": h}))
+(b / "manual-gate-current.json").write_text(json.dumps({
+    "bundle": "ReimsADLManualActivation.kext",
+    "identifier": "lab.reims.ReimsADLManualActivation",
+    "version": "0.2.2",
+    "uuid": "AAAA0000-0000-0000-0000-000000000001",
+    "hashes": h,
+}))
+pathlib.Path(sys.argv[2]).write_bytes(plistlib.dumps({
+    "CFBundleIdentifier": "com.apple.driver.AppleIntelTGLGraphics",
+    "CFBundleVersion": "16.0.0",
+}))
 EOP
-  printf 'tgl' > "${T}/tgl/AppleIntelTGLGraphics.kext/Contents/MacOS/AppleIntelTGLGraphics"
-  "${PYBIN}" -c "import plistlib,sys;open(sys.argv[1],'wb').write(plistlib.dumps({'CFBundleIdentifier':'com.apple.driver.AppleIntelTGLGraphics','CFBundleVersion':'16.0.0'}))" \
-    "${T}/tgl/AppleIntelTGLGraphics.kext/Contents/Info.plist"
+  printf 'control' > "${TPL}/fork/prebuilt/control"
+  printf 'tgl' > "${TPL}/tgl/AppleIntelTGLGraphics.kext/Contents/MacOS/AppleIntelTGLGraphics"
 
   # 桩：补丁脚本（真脚本需要 Apple 二进制，CI 无法提供）
-  cat > "${FORK}/desktop-manual-20260917/fix/prepare-deferred-runtime.py" <<'EOP'
-import json, pathlib, sys, os
+  cat > "${TPL}/fork/desktop-manual-20260917/fix/prepare-deferred-runtime.py" <<'EOP'
+import json, pathlib, sys, os, hashlib, plistlib
 if os.environ.get("FAKE_PREPARE_RC", "0") != "0": sys.exit(int(os.environ["FAKE_PREPARE_RC"]))
 if sys.argv[1] == "--check-only": print(json.dumps({"ok": True})); sys.exit(0)
 base = pathlib.Path(__file__).resolve().parent
 k = base / "ReimsTGLManualRuntime.kext/Contents/MacOS"; k.mkdir(parents=True)
 (k / "AppleIntelTGLGraphics").write_bytes(b"patched")
-(base / "deferred-runtime.json").write_text(json.dumps({"candidate_uuid": "bbbb0000000000000000000000000002"}))
+(k.parent / "Info.plist").write_bytes(plistlib.dumps({"CFBundleIdentifier": "com.apple.driver.AppleIntelTGLGraphics", "CFBundleVersion": "16.0.3", "IOKitPersonalities": {}}))
+(base / "deferred-runtime.json").write_text(json.dumps({"candidate_uuid": "bbbb0000000000000000000000000002", "candidate_sha256": hashlib.sha256(b"patched").hexdigest()}))
 print("{}")
 EOP
   # 桩：igpu-start --accel-only
-  cat > "${FORK}/igpu-start" <<'EOS'
+  cat > "${TPL}/fork/igpu-start" <<'EOS'
 #!/bin/sh
 [ -n "${FAKE_P2_CRASH:-}" ] && { echo crash > "${FAKE}/crashed"; kill -9 "${PPID}"; exit 0; }
 [ -n "${FAKE_P2_SIGNAL:-}" ] && { kill "-${FAKE_P2_SIGNAL}" "${PPID}"; exit 130; }
@@ -91,7 +111,7 @@ EOL
 exit "${FAKE_P2_RC:-0}"
 EOS
 
-  # 系统命令桩
+  # 系统命令桩（只生成一份无状态桩目录，减少 Windows HVCI/Defender 重复扫描压力）
   cat > "${B}/id" <<'EOS'
 #!/bin/sh
 [ "$1" = "-u" ] && { echo "${FAKE_UID:-0}"; exit 0; }; exec /usr/bin/id "$@"
@@ -99,16 +119,21 @@ EOS
   cat > "${B}/sw_vers" <<'EOS'
 #!/bin/sh
 echo "${FAKE_BUILD:-25G83}"
+exit "${FAKE_SWVERS_RC:-0}"
 EOS
   cat > "${B}/sysctl" <<'EOS'
 #!/bin/sh
 case "$2" in
-  kern.bootsessionuuid) cat "${FAKE}/bootid" ;;
-  kern.bootargs) if [ -f "${FAKE}/applied-on-boot" ] && [ -z "${FAKE_NO_ALLOW3D:-}" ]; then echo "-v -allow3d ${FAKE_BOOTARGS_EXTRA:-}"; else echo "-v"; fi ;;
+  kern.bootsessionuuid) cat "${FAKE}/bootid"; exit "${FAKE_BOOTID_RC:-0}" ;;
+  kern.bootargs) if [ -f "${FAKE}/applied-on-boot" ] && [ -z "${FAKE_NO_ALLOW3D:-}" ]; then echo "-v -allow3d ${FAKE_BOOTARGS_EXTRA:-}"; else echo "-v"; fi; exit "${FAKE_BOOTARGS_QUERY_RC:-0}" ;;
 esac
 EOS
   cat > "${B}/ioreg" <<'EOS'
 #!/bin/sh
+case " $* " in
+  *" -c ReimsADLManualActivation "*)
+    exec "${FAKE_PY}" -c 'import os,plistlib,sys; nodes=[] if os.environ.get("FAKE_GATE_SERVICE_ABSENT") else [{"IOObjectClass":"ReimsADLManualActivation","ActivationPolicy":"explicit-root-current-boot-only","RuntimeRequested":False}];sys.stdout.buffer.write(plistlib.dumps(nodes))' ;;
+esac
 if [ "$1" = "-p" ]; then
   printf '+-o Root  <class IORegistryEntry, id 0x100000100, retain 28>\n'
   printf '  +-o iMac20,2  <class IOPlatformExpertDevice, id 0x100000110, registered, matched, active, busy 0 (1 ms), retain 40>\n'
@@ -135,8 +160,17 @@ EOP
 EOS
   cat > "${B}/nvram" <<'EOS'
 #!/bin/sh
-case "$1" in
-  -x) exec "${FAKE_PY}" -c "import plistlib,sys,os;v=os.environ.get('FAKE_CSR') or ('03000000' if os.path.exists(os.environ['FAKE']+'/applied-on-boot') else '00000000');sys.stdout.buffer.write(plistlib.dumps({'csr-active-config':bytes.fromhex(v)}))" ;;
+case "$*" in
+  "-x csr-active-config")
+    exec "${FAKE_PY}" -c "import plistlib,sys,os;v=os.environ.get('FAKE_CSR') or ('03000000' if os.path.exists(os.environ['FAKE']+'/applied-on-boot') else '00000000');sys.stdout.buffer.write(plistlib.dumps({'csr-active-config':bytes.fromhex(v)}));sys.exit(int(os.environ.get('FAKE_CSR_QUERY_RC','0')))" ;;
+  "-x 4D1FDA02-38C7-4A6A-9CC6-4BCCA8B30102:boot-path")
+    if [ -n "${FAKE_BOOTPATH_QUERY_ERROR:-}" ]; then echo "nvram: internal failure" >&2; exit 2; fi
+    if [ -n "${FAKE_NO_BOOTPATH:-}" ]; then
+      echo "nvram: Error getting variable - '4D1FDA02-38C7-4A6A-9CC6-4BCCA8B30102:boot-path': (iokit/common) data was not found" >&2
+      exit 1
+    fi
+    if [ -n "${FAKE_BOOTPATH_CORRUPT:-}" ]; then printf '<corrupt-plist'; exit 0; fi
+    exec "${FAKE_PY}" -c 'import os,plistlib,sys; u=os.environ.get("FAKE_BOOT_UUID","11111111-2222-4333-8444-555555555555"); p=(r"PciRoot(0x0)/Pci(0x14,0x0)/USB(0x1,0x0)/HD(1,GPT,"+u+r",0x800,0x64000)/\EFI\BOOT\BOOTx64.EFI").encode("utf-16-le")+b"\x00\x00"; sys.stdout.buffer.write(plistlib.dumps({"4D1FDA02-38C7-4A6A-9CC6-4BCCA8B30102:boot-path":p}))' ;;
   *:boot-path)
     [ -n "${FAKE_NO_BOOTPATH:-}" ] && exit 1
     printf '%s\tPciRoot(0x0)/Pci(0x14,0x0)/USB(0x1,0x0)/HD(1,GPT,%s,0x800,0x64000)/\\EFI\\BOOT\\BOOTx64.EFI\n' "$1" "${FAKE_BOOT_UUID:-11111111-2222-4333-8444-555555555555}" ;;
@@ -153,6 +187,11 @@ case "$1" in
     [ -n "${FAKE_DECOY_ESP:-}" ] && echo "   1:  EFI OCEFI   200.0 MB   disk7s1"
     exit 0 ;;
   info)
+    if [ "$2" = "/" ]; then
+      [ -n "${FAKE_ROOT_DISKUTIL_FAIL:-}" ] && exit 1
+      printf '   Volume Name:  TAHOE\n   Volume UUID:  %s\n' "${FAKE_SYSTEM_UUID:-66666666-7777-4888-9999-AAAAAAAAAAAA}"
+      exit 0
+    fi
     [ -n "${FAKE_DISKUTIL_FAIL:-}" ] && exit 1
     case "$2" in
       11111111-2222-4333-8444-555555555555|"${FAKE_DISK:-disk9s1}") : ;;
@@ -164,21 +203,90 @@ esac
 EOS
   cat > "${B}/kmutil" <<'EOS'
 #!/bin/sh
+# 严格 CLI profile：未知命令/参数必须失败；源目录、待采用 Aux、当前 Aux、当前内存四层严格分离。
+echo "kmutil $*" >> "${FAKE}/kmutil.log"
 case "$1" in
+  load)
+    if [ "${2:-}" = "--help" ]; then
+      printf 'USAGE: kmutil load <options>\n-p, --bundle-path <bundle-path>\n--load-style start-only match-only start-and-match\n'; exit 0
+    fi
+    # Apple 安装指南要求一次调用包含全部 kext，避免两份包分别产生批准提示。
+    [ "$#" -eq 7 ] && [ "$2" = "--load-style" ] && [ "$3" = "start-only" ] && [ "$4" = "-p" ] && [ "$6" = "-p" ] || exit 64
+    case "$5:$7" in
+      */ReimsTGLBoot.kext:*/ReimsADLManualActivation.kext) : ;;
+      *) exit 64 ;;
+    esac
+    [ -d "$5" ] && [ -d "$7" ] || exit 66
+    _rc=${FAKE_KMUTIL_LOAD_RC:-${FAKE_KMUTIL_RC:-0}}
+    [ -n "${FAKE_KMUTIL_SIGNAL:-}" ] && { echo "Interrupted by ${FAKE_KMUTIL_SIGNAL}"; exit 130; }
+    case "${_rc}" in
+      0|28) : > "${FAKE}/aux-next-present"; rm -f "${FAKE}/aux-next-absent" ;;
+      27) echo 'User approval is required.' ;;
+      *) echo 'KernelManagement request failed.' ;;
+    esac
+    exit "${_rc}" ;;
+  rebuild)
+    if [ "${2:-}" = "--help" ]; then printf 'USAGE: kmutil rebuild\nAttempts an auxiliary kernel collection rebuild\n'; exit 0; fi
+    [ "$#" -eq 1 ] || exit 64
+    [ -n "${FAKE_KMUTIL_SIGNAL:-}" ] && { echo "Interrupted by ${FAKE_KMUTIL_SIGNAL}"; exit 130; }
+    _rc=${FAKE_KMUTIL_REBUILD_RC:-${FAKE_KMUTIL_RC:-0}}
+    case "${_rc}" in
+      0|28)
+        if [ -e "${FAKE}/Extensions/ReimsTGLBoot.kext" ] || [ -e "${FAKE}/Extensions/ReimsADLManualActivation.kext" ]; then
+          : > "${FAKE}/aux-next-present"; rm -f "${FAKE}/aux-next-absent"
+        else
+          : > "${FAKE}/aux-next-absent"; rm -f "${FAKE}/aux-next-present"
+        fi ;;
+      27) echo 'User approval is required.' ;;
+      *) echo 'Auxiliary collection rebuild request failed.' ;;
+    esac
+    exit "${_rc}" ;;
   install)
-    echo "kmutil install $*" >> "${FAKE}/kmutil.log"
+    # 重放 25G83 实机的缺 KDK 故障；仅保留给旧行为负向对照，新脚本绝不应调用。
+    if [ -n "${FAKE_NO_KDK:-}" ]; then
+      echo 'Missing Developer Kit: As of macOS 13.0, you will need to install a KDK matching your build 25G83 to rebuild kernel collections.'
+      exit 34
+    fi
     [ -n "${FAKE_KMUTIL_SIGNAL:-}" ] && { kill "-${FAKE_KMUTIL_SIGNAL}" "${PPID}"; exit 130; }
     exit "${FAKE_KMUTIL_RC:-0}" ;;
+  inspect)
+    if [ "${2:-}" = "--help" ]; then printf 'USAGE: kmutil inspect <options>\n-A, --auxiliary-path <auxiliary-path>\n--show-kext-uuids\n'; exit 0; fi
+    [ "$#" -eq 4 ] && [ "$2" = "--show-kext-uuids" ] && [ "$3" = "-A" ] || { echo "Unknown option '${2:-}'"; exit 64; }
+    [ -n "${FAKE_DISK_AUX_RC:-}" ] && exit "${FAKE_DISK_AUX_RC}"
+    printf 'No variant specified, falling back to release\nauxiliary kernel collection at %s (BBBB0000-0000-0000-0000-000000000002):\nExtension Information:\n' "$4"
+    printf 'com.apple.driver.HighPointIOP\t1.0\t/Library/Extensions/HighPointIOP.kext\t(CCCC0000-0000-0000-0000-000000000009)\n'
+    if [ -n "${FAKE_DISK_AUX_STALE:-}" ] || [ -f "${FAKE}/aux-next-present" ] \
+       || { [ -f "${FAKE}/aux-current-present" ] && [ ! -f "${FAKE}/aux-next-absent" ]; }; then
+      printf 'com.apple.driver.AppleIntelTGLGraphics\t16.0.3\t/Library/Extensions/ReimsTGLBoot.kext\t(BBBB0000-0000-0000-0000-000000000002)\n'
+      printf 'lab.reims.ReimsADLManualActivation\t0.2.2\t/Library/Extensions/ReimsADLManualActivation.kext\t(AAAA0000-0000-0000-0000-000000000001)\n'
+    fi
+    exit 0 ;;
   showloaded)
-    [ "${2:-}" = "--collection" ] && exit 0
-    if [ -d "${FAKE}/Extensions/ReimsTGLBoot.kext" ] && [ -z "${FAKE_RT_UNLOADED:-}" ]; then
+    if [ "${2:-}" = "--help" ]; then printf 'USAGE: kmutil showloaded <options>\n--collection boot sys aux codeless\n--show loaded unloaded all\n'; exit 0; fi
+    printf 'No variant specified, falling back to release\nIndex Refs Address Size Wired Name (Version) UUID <Linked Against>\n'
+    case "$*" in
+      'showloaded'|'showloaded --collection aux') : ;;
+      'showloaded --collection aux --show all')
+        [ -n "${FAKE_AUX_QUERY_RC:-}" ] && exit "${FAKE_AUX_QUERY_RC}"
+        if [ -f "${FAKE}/aux-current-present" ] || [ -n "${FAKE_AUX_STALE:-}" ]; then
+          echo '  1 0 0 0 0 com.apple.driver.AppleIntelTGLGraphics (16.0.3) BBBB0000-0000-0000-0000-000000000002 <1>'
+          echo '  2 0 0 0 0 lab.reims.ReimsADLManualActivation (0.2.2) AAAA0000-0000-0000-0000-000000000001 <1>'
+        fi
+        exit 0 ;;
+      *) exit 64 ;;
+    esac
+    # 当前内存模块仅由启动采用集合决定，绝不从 Extensions 源目录推导。
+    if [ -f "${FAKE}/mem-rt-loaded" ] && [ -z "${FAKE_RT_UNLOADED:-}" ]; then
       if [ -n "${FAKE_RT_WRONG_UUID:-}" ]; then
-        echo "  1 0 0 0 0 com.apple.driver.AppleIntelTGLGraphics (16.0.3) CCCC0000-0000-0000-0000-000000000009 <1>"
+        echo '  1 0 0 0 0 com.apple.driver.AppleIntelTGLGraphics (16.0.3) CCCC0000-0000-0000-0000-000000000009 <1>'
       else
-        echo "  1 0 0 0 0 com.apple.driver.AppleIntelTGLGraphics (16.0.3) BBBB0000-0000-0000-0000-000000000002 <1>"
-      fi; fi
-    if [ -d "${FAKE}/Extensions/ReimsADLManualActivation.kext" ]; then
-      echo "  2 0 0 0 0 lab.reims.ReimsADLManualActivation (0.2.2) AAAA0000-0000-0000-0000-000000000001 <1>"; fi ;;
+        echo '  1 0 0 0 0 com.apple.driver.AppleIntelTGLGraphics (16.0.3) BBBB0000-0000-0000-0000-000000000002 <1>'
+      fi
+    fi
+    if [ -f "${FAKE}/mem-gate-loaded" ] && [ -z "${FAKE_GATE_UNLOADED:-}" ]; then
+      echo '  2 0 0 0 0 lab.reims.ReimsADLManualActivation (0.2.2) AAAA0000-0000-0000-0000-000000000001 <1>'
+    fi ;;
+  *) echo "Unsupported kmutil command: $*"; exit 64 ;;
 esac
 EOS
   cat > "${B}/ditto" <<'EOS'
@@ -219,20 +327,65 @@ EOS
   if ! command -v shasum >/dev/null 2>&1; then
     printf '#!/bin/sh\n[ "$1" = "-a" ] && shift 2\nexec sha256sum "$@"\n' > "${B}/shasum"
   fi
-  chmod +x "${B}"/* "${FORK}/igpu-start"
+  chmod +x "${B}"/* "${TPL}/fork/igpu-start"
 }
 
-run() {  # run [参数...]
-  env PATH="${B}:${PATH}" FAKE="${T}" FAKE_PY="${PYBIN}" HOME="${T}/home" \
+init_suite_assets
+
+mk() {
+  [ -n "${T}" ] && [ -d "${T}" ] && rm -rf "${T}"
+  T="${SUITE_ROOT}/case"
+  cp -R "${TPL}" "${T}"
+  ESP="${T}/ESP"; FORK="${T}/fork"; EXT="${T}/Extensions"
+  mkdir -p "${EXT}" "${T}/panic"
+}
+
+run_once() {  # 单次公开入口，保持每 Boot / 每阶段的真实边界
+  env MSYS2_ARG_CONV_EXCL="${T}/collections/AuxiliaryKernelExtensions.kc" \
+      PATH="${B}:${PATH}" FAKE="${T}" FAKE_PY="${PYBIN}" HOME="${T}/home" \
       IGPU_FORK_SRC="${FORK}" IGPU_FIELD_ROOT="${T}/root" IGPU_EXT_DIR="${T}/Extensions" \
       IGPU_TGL_INPUT="${T}/tgl/AppleIntelTGLGraphics.kext" IGPU_EVIDENCE_ROOT="${IGPU_EVIDENCE_ROOT:-${T}/evidence}" \
       IGPU_PANIC_DIR="${T}/panic" IGPU_RECOVERY_MARK="${IGPU_RECOVERY_MARK:-${T}/home/RECOVERY-EFI-VERIFIED.txt}" \
       IGPU_DRILL_FILE="${IGPU_DRILL_FILE:-${T}/drill.txt}" \
+      IGPU_BOOT_KC="${T}/collections/BootKernelExtensions.kc" \
+      IGPU_SYSTEM_KC="${T}/collections/SystemKernelExtensions.kc" \
+      IGPU_AUX_KC="${T}/collections/AuxiliaryKernelExtensions.kc" \
       sh "${FORK}/field/adl-s-field.sh" "$@" > "${T}/out.txt" 2>&1
 }
-reboot_sim() {  # 模拟重启：换开机标识；已写入的 config 在下一次开机生效；运行时状态消失
+run() {
+  local rc i merged
+  run_once "$@"; rc=$?
+  # 旧场景验证最终哈希/失败恢复；新的专项场景独立验证每一个 pending/reboot 边界。
+  if [ "${LEGACY_ROLLBACK_AUTO:-0}" = "1" ] && [ "${1:-}" = "--rollback" ] && [ "${rc}" -eq 0 ]; then
+    merged="${T}/rollback-user-flow.txt"
+    cp "${T}/out.txt" "${merged}"
+    for i in 1 2; do
+      case "$(stage_now)" in
+        rollback-pending-reboot|rollback-awaiting-approval|rollback-final-reboot)
+          reboot_sim
+          run_once; rc=$?
+          cat "${T}/out.txt" >> "${merged}"
+          [ "${rc}" -eq 0 ] || break ;;
+        *) break ;;
+      esac
+    done
+    cp "${merged}" "${T}/out.txt"
+  fi
+  return "${rc}"
+}
+
+reboot_sim() {  # 模拟重启：换开机标识；仅在重启时切换当前采用的 AuxKC 与内核内存状态
   echo "boot-$(date +%s)-$RANDOM" > "${T}/bootid"
   rm -f "${T}/accel" "${T}/accel-busy"
+  if [ -z "${FAKE_NO_ADOPT:-}" ]; then
+    if [ -f "${T}/aux-next-present" ]; then : > "${T}/aux-current-present"; rm -f "${T}/aux-next-present"; fi
+    if [ -f "${T}/aux-next-absent" ]; then rm -f "${T}/aux-current-present" "${T}/aux-next-absent"; fi
+  fi
+  rm -f "${T}/mem-rt-loaded" "${T}/mem-gate-loaded"
+  if [ -f "${T}/aux-current-present" ]; then
+    : > "${T}/mem-rt-loaded"
+    : > "${T}/mem-gate-loaded"
+  fi
   if grep -q allow3d "${T}/ESP/EFI/OC/config.plist"; then : > "${T}/applied-on-boot"; else rm -f "${T}/applied-on-boot"; fi
 }
 stage_now() { head -1 "${T}/root/STAGE" 2>/dev/null || echo start; }
@@ -240,6 +393,210 @@ to_p1() { run; reboot_sim; run; reboot_sim; run; }
 ev() { printf '%s' "${T}/evidence/results-adl-s-$1-*/$2"; }
 cfgsha() { sha "${T}/ESP/EFI/OC/config.plist"; }
 
+auxkc_cases() {
+  echo "== A1 重放缺 KDK，但正常装载不碰 Boot/System =="
+  mk; run; reboot_sim
+  FAKE_NO_KDK=1 run; chk "缺 KDK 仍能发出正常装载请求" "$?" 0
+  chk "阶段 installed（不是已验硬件）" "$(stage_now)" installed
+  has "同一次请求包含两份 kext" 'load --load-style start-only -p .*ReimsTGLBoot.kext -p .*ReimsADLManualActivation.kext' "${T}/kmutil.log"
+  lacks "不再调用 update-all" 'update-all' "${T}/kmutil.log"
+  [ -d "${EXT}/ReimsTGLBoot.kext" ] && [ -d "${EXT}/ReimsADLManualActivation.kext" ] && ok "待重启包仍保留" || no "正常请求错误撤包"
+
+  echo "== A2 27 等批准，28 等重启，都不是安装故障 =="
+  mk; run; reboot_sim
+  FAKE_KMUTIL_LOAD_RC=27 run; chk "27 进入等待而非失败" "$?" 0
+  chk "27 阶段 awaiting-approval" "$(stage_now)" awaiting-approval
+  [ -d "${EXT}/ReimsTGLBoot.kext" ] && ok "27 不撤包" || no "27 错误撤包"
+  has "27 的退出码已留证" 'kmutil_load_rc=27' "$(ev install summary.txt)"
+  run; chk "等批准同 Boot 不重复请求" "$?" 3
+  chk "只调用过一次 load" "$(grep -c '^kmutil load --load-style' "${T}/kmutil.log")" 1
+  mk; run; reboot_sim
+  FAKE_KMUTIL_LOAD_RC=28 run; chk "28 请求等重启" "$?" 0
+  chk "28 阶段 installed" "$(stage_now)" installed
+  has "28 的退出码已留证" 'kmutil_load_rc=28' "$(ev install summary.txt)"
+
+  echo "== A3 从旧 install-failed+DIRTY 只受控回滚，不盲目重装 =="
+  mk; run; reboot_sim
+  printf 'install-failed\n' > "${T}/root/STAGE"
+  : > "${T}/root/KMUTIL_DIRTY"
+  FAKE_NO_KDK=1 run; chk "旧失败可以用同一入口发出回滚请求" "$?" 0
+  chk "先等回滚重启" "$(stage_now)" rollback-pending-reboot
+  grep -q allow3d "${ESP}/EFI/OC/config.plist" && ok "未确认撤出前保持 config 与 SIP" || no "过早还原 config"
+  [ -f "${T}/root/BACKUP" ] && [ -f "${T}/root/KMUTIL_DIRTY" ] && ok "备份与 DIRTY 保留" || no "过早清除回滚记录"
+  has "只请求 Aux 重建" '^kmutil rebuild$' "${T}/kmutil.log"
+  lacks "没有请求 load" '^kmutil load --load-style' "${T}/kmutil.log"
+  has "记录 legacy 基线未验证" 'original_system_baseline=unverified-legacy' "$(ev rollback summary.txt)"
+  run; chk "同 Boot 等重启，不再 rebuild" "$?" 3
+  chk "只调用过一次 rebuild" "$(grep -c '^kmutil rebuild$' "${T}/kmutil.log")" 1
+  reboot_sim; run; chk "第一次重启后确认集合并还原 config" "$?" 0
+  chk "还需最终基线重启" "$(stage_now)" rollback-final-reboot
+  chk "config 恢复改前哈希" "$(cfgsha)" "${ORIG_SHA}"
+  [ -f "${T}/root/BACKUP" ] && ok "最终 NVRAM 核验前不丢备份" || no "过早清除备份"
+  run; chk "最终收尾同 Boot 不放行" "$?" 3
+  reboot_sim; run; chk "最终基线核验后完成" "$?" 0
+  chk "阶段 start" "$(stage_now)" start
+
+  echo "== A4 重建非零/旧 AuxKC/查询失败均不虚报完成 =="
+  mk; run; reboot_sim; printf 'install-failed\n' > "${T}/root/STAGE"; : > "${T}/root/KMUTIL_DIRTY"
+  FAKE_KMUTIL_REBUILD_RC=27 run --rollback; chk "回滚 27 等批准" "$?" 0
+  chk "回滚批准状态" "$(stage_now)" rollback-awaiting-approval
+  grep -q allow3d "${ESP}/EFI/OC/config.plist" && ok "27 不还原 config" || no "27 过早还原"
+  mk; run; reboot_sim; printf 'install-failed\n' > "${T}/root/STAGE"; : > "${T}/root/KMUTIL_DIRTY"
+  FAKE_KMUTIL_REBUILD_RC=28 run --rollback; chk "回滚 28 等重启" "$?" 0
+  chk "回滚重启状态" "$(stage_now)" rollback-pending-reboot
+  reboot_sim; FAKE_AUX_STALE=1 run; chk "新 Boot 仍可用的组件让回滚停下" "$?" 1
+  chk "遗留 Aux 标为 incomplete" "$(stage_now)" rollback-incomplete
+  grep -q allow3d "${ESP}/EFI/OC/config.plist" && ok "遗留 Aux 不恢复 SIP" || no "遗留时还原了 config"
+  mk; run; reboot_sim; printf 'install-failed\n' > "${T}/root/STAGE"; : > "${T}/root/KMUTIL_DIRTY"
+  run --rollback; reboot_sim; FAKE_AUX_QUERY_RC=1 run
+  chk "集合查询失败不算清理成功" "$?" 1
+  [ -f "${T}/root/BACKUP" ] && ok "查询失败保留备份" || no "查询失败丢备份"
+}
+
+ownership_cases() {
+  echo "== A5 陌生同名包不能被回滚移动 =="
+  mk; run; reboot_sim; run; reboot_sim
+  printf 'foreign component' > "${EXT}/ReimsTGLBoot.kext/Contents/MacOS/AppleIntelTGLGraphics"
+  run --rollback; chk "运行时哈希不符：回滚拒绝" "$?" 1
+  [ -f "${EXT}/ReimsTGLBoot.kext/Contents/MacOS/AppleIntelTGLGraphics" ] && ok "陌生包仍保留原处" || no "错误移走了陌生包"
+  chk "阶段 incomplete" "$(stage_now)" rollback-incomplete
+  grep -q allow3d "${ESP}/EFI/OC/config.plist" && ok "归属未确认不还原 config" || no "归属不明仍还原 config"
+}
+
+review_regressions() {
+  echo "== A8 独立审查反例 =="
+  # F1a: 安装基线已变化，回滚不得重采样洗白
+  mk; to_p1
+  printf 'changed system collection' >> "${T}/collections/BootKernelExtensions.kc"
+  run --rollback; chk "旧系统基线已变：不能重采样洗白" "$?" 1
+  [ -d "${EXT}/ReimsTGLBoot.kext" ] && ok "基线变化未继续撤源" || no "忽略旧系统变化"
+
+  # F1b: 最终重启阶段 Boot/System 集合变化，不得清记录
+  mk; to_p1; run --rollback; reboot_sim; run; reboot_sim
+  printf 'mutated before final baseline' >> "${T}/collections/SystemKernelExtensions.kc"
+  run; chk "最终阶段系统集合变化：拒绝收尾" "$?" 1
+  [ -f "${T}/root/BACKUP" ] && [ -f "${T}/root/KMUTIL_DIRTY" ] && ok "最终阶段集合变化保留恢复记录" || no "最终阶段漏检集合变化"
+
+  # F3a: 遗留源在移动旧 context / prepare 前即拒绝
+  mk; run; reboot_sim
+  mkdir -p "${T}/root/fork/sentinel"
+  mkdir -p "${EXT}/ReimsTGLBoot.kext"
+  run; chk "遗留源在 prepare 前就拒绝" "$?" 1
+  [ -d "${T}/root/fork/sentinel" ] && ok "没有新建/替换活动context" || no "先换context再拒绝源"
+
+  # F3b: 复制中途强制终止（COPY_MARKER 存在但 DIRTY 未建），默认续跑进入受控回滚而非覆盖 context
+  mk; run; reboot_sim
+  mkdir -p "${T}/root/fork/sentinel" "${EXT}/ReimsTGLBoot.kext/Contents/MacOS"
+  printf 'pat' > "${EXT}/ReimsTGLBoot.kext/Contents/MacOS/AppleIntelTGLGraphics"
+  printf '{"identifier":"com.apple.driver.AppleIntelTGLGraphics","version":"16.0.3","uuid":"BBBB0000-0000-0000-0000-000000000002","empty_personalities":true,"hashes":{"Contents/MacOS/AppleIntelTGLGraphics":"0000","Contents/Info.plist":"1111"}}\n' > "${T}/root/INSTALLED_RUNTIME_RECEIPT.json"
+  printf 'boot=boot-2\nts=20261115\n' > "${T}/root/INSTALL_COPY_PENDING"
+  run; chk "复制中断续跑进入受控回滚" "$?" 0
+  chk "进入回滚等待重启" "$(stage_now)" rollback-pending-reboot
+  [ -d "${T}/root/fork/sentinel" ] && ok "复制中断恢复未替换旧context" || no "复制中断替换了旧context"
+  [ ! -e "${EXT}/ReimsTGLBoot.kext" ] && [ ! -f "${T}/root/INSTALL_COPY_PENDING" ] && ok "部分副本已按本次复制标记撤出" || no "部分副本残留"
+
+  # F3c: 即便存在 COPY_MARKER，未知路径或陌生 Info.plist 的包也拒绝移动
+  mk; run; reboot_sim
+  mkdir -p "${EXT}/ReimsTGLBoot.kext/Contents"
+  printf 'foreign' > "${EXT}/ReimsTGLBoot.kext/Contents/Foreign.bin"
+  printf '{"identifier":"com.apple.driver.AppleIntelTGLGraphics","version":"16.0.3","uuid":"BBBB0000-0000-0000-0000-000000000002","empty_personalities":true,"hashes":{"Contents/MacOS/AppleIntelTGLGraphics":"0000","Contents/Info.plist":"1111"}}\n' > "${T}/root/INSTALLED_RUNTIME_RECEIPT.json"
+  printf 'boot=boot-2\nts=20261115\n' > "${T}/root/INSTALL_COPY_PENDING"
+  run; chk "COPY_MARKER下含陌生文件仍拒绝移动" "$?" 1
+  [ -f "${EXT}/ReimsTGLBoot.kext/Contents/Foreign.bin" ] && ok "陌生部分包未被误移" || no "COPY_MARKER误移了陌生包"
+
+  # F4: executable 哈希不变但包装 Info.plist 被改，拒绝归属与移动
+  mk; to_p1
+  printf '<plist version="1.0"><dict><key>CFBundleIdentifier</key><string>com.example.Foreign</string></dict></plist>' > "${EXT}/ReimsTGLBoot.kext/Contents/Info.plist"
+  run --rollback; chk "exe相同但Info被改：不属于原包" "$?" 1
+  [ -f "${EXT}/ReimsTGLBoot.kext/Contents/Info.plist" ] && ok "改过包装的包保留" || no "误移陌生包装"
+
+  # F5: 查询退出码非零但输出完整，P2 与 status 均 fail closed
+  mk; to_p1
+  FAKE_BOOTARGS_QUERY_RC=1 run; chk "完整输出但查询失败：不进P2" "$?" 1
+  [ ! -f "${T}/accel" ] && ok "非零查询码不动GPU" || no "查询失败仍跑GPU"
+  FAKE_CSR_QUERY_RC=1 run --status
+  has "status非零码=unverified" 'observed_state=unverified' "${T}/out.txt"
+  lacks "status非零码不提示P2" '保存工作后再跑一次' "${T}/out.txt"
+
+  # F6: 四层独立（源目录 != 当前内存；未采用新 AuxKC 的新 Boot 不能过 P1）
+  mk; run; reboot_sim; run
+  env PATH="${B}:${PATH}" FAKE="${T}" kmutil showloaded > "${T}/observed-running.txt"
+  lacks "源存在不等于当前内存已加载" 'com.apple.driver.AppleIntelTGLGraphics' "${T}/observed-running.txt"
+  FAKE_NO_ADOPT=1 reboot_sim
+  run; chk "新Boot未采用候选AuxKC：P1拒绝" "$?" 1
+  chk "未采用候选集合标为unresolved" "$(stage_now)" approval-unresolved
+
+  mk; to_p1
+  run --rollback
+  env PATH="${B}:${PATH}" FAKE="${T}" kmutil showloaded > "${T}/observed-running.txt"
+  has "源撤出不等于当前内存已退出" 'com.apple.driver.AppleIntelTGLGraphics' "${T}/observed-running.txt"
+
+  # F2: 最终恢复从别的 ESP 启动或 boot-path 损坏，不得清记录
+  mk; to_p1; run --rollback; reboot_sim; run; reboot_sim
+  FAKE_BOOT_UUID=AAAAAAAA-2222-4333-8444-555555555555 run
+  chk "明确从别的ESP启动：最终不清记录" "$?" 1
+  [ -f "${T}/root/BACKUP" ] && [ -f "${T}/root/KMUTIL_DIRTY" ] && ok "错误启动来源保留备份与DIRTY" || no "来源错仍丢备份"
+  FAKE_BOOTPATH_CORRUPT=1 run
+  chk "损坏的boot-path：最终不清记录" "$?" 1
+  [ -f "${T}/root/BACKUP" ] && ok "损坏boot-path保留备份" || no "损坏boot-path丢备份"
+}
+
+if [ "${1:-}" = "--review-only" ]; then
+  review_regressions
+  printf '独立反例通过 %s，失败 %s\n' "${P}" "${F}"
+  [ "${F}" -eq 0 ]; exit "$?"
+fi
+
+p1_evidence_cases() {
+  echo "== A6 每个 P1/P2 启动边界重新核验 =="
+  mk; run; reboot_sim; run; reboot_sim
+  FAKE_CSR=00000000 run; chk "P1 的 SIP 失效：拒绝" "$?" 1
+  [ ! -f "${T}/accel" ] && ok "SIP 失效不动 GPU" || no "错误启动 GPU"
+  mk; run; reboot_sim; run; reboot_sim
+  FAKE_GATE_SERVICE_ABSENT=1 run; chk "只有模块没有控制器服务：拒绝 P1" "$?" 1
+  mk; run; reboot_sim; run; reboot_sim
+  FAKE_BUILD=25F000 run; chk "P1 系统已换版本：拒绝" "$?" 1
+  mk; to_p1; reboot_sim; run; chk "新 Boot 先复核 P1" "$?" 0
+  [ ! -f "${T}/accel" ] && ok "新 Boot 第一调用不跑 P2" || no "复用历史 P1 直接跑 P2"
+  run; chk "本 Boot P1 有效后才运行 P2" "$?" 0
+}
+
+status_evidence_cases() {
+  echo "== A7 历史进度不能冒充当前安全状态 =="
+  mk; to_p1
+  cp "${H}/fixture-config.plist" "${ESP}/EFI/OC/config.plist"
+  reboot_sim
+  run --status; chk "status 只读观察返回0" "$?" 0
+  has "仍可看到历史进度" 'stage=p1-pass' "${T}/out.txt"
+  has "但当前状态是需要恢复" 'observed_state=recovery-needed' "${T}/out.txt"
+  lacks "不再提示立即P2" 'next=保存工作后' "${T}/out.txt"
+}
+
+if [ "${1:-}" = "--status-only" ]; then
+  status_evidence_cases
+  printf '状态证据通过 %s，失败 %s\n' "${P}" "${F}"
+  [ "${F}" -eq 0 ]; exit "$?"
+fi
+
+if [ "${1:-}" = "--p1-only" ]; then
+  p1_evidence_cases
+  printf 'P1 证据通过 %s，失败 %s\n' "${P}" "${F}"
+  [ "${F}" -eq 0 ]; exit "$?"
+fi
+
+if [ "${1:-}" = "--ownership-only" ]; then
+  ownership_cases
+  printf '归属通过 %s，失败 %s\n' "${P}" "${F}"
+  [ "${F}" -eq 0 ]; exit "$?"
+fi
+
+if [ "${1:-}" = "--auxkc-only" ]; then
+  auxkc_cases
+  printf 'AuxKC 通过 %s，失败 %s\n' "${P}" "${F}"
+  [ "${F}" -eq 0 ]; exit "$?"
+fi
+
+LEGACY_ROLLBACK_AUTO=1
 echo "== 1 完整推进 =="
 mk
 run; chk "第 1 步退出 0" "$?" 0
@@ -262,7 +619,8 @@ chk "未重启续跑阶段不变" "$(stage_now)" config-applied
 reboot_sim; run; chk "第 2 步退出 0" "$?" 0
 chk "阶段 installed" "$(stage_now)" installed
 [ -d "${T}/Extensions/ReimsTGLBoot.kext" ] && [ -d "${T}/Extensions/ReimsADLManualActivation.kext" ] && ok "两个 kext 已放入" || no "kext 未放入"
-grep -q update-all "${T}/kmutil.log" && ok "已重建 AuxKC" || no "未调用 kmutil install"
+has "已请求正常 kernelmanagerd 装载" 'kmutil load --load-style start-only' "${T}/kmutil.log"
+lacks "安装未请求宽范围重建" 'update-all' "${T}/kmutil.log"
 has "工作副本 chown 给 root" "chown -R root:wheel ${T}/root/fork" "${T}/chown.log"
 has "TGL 工作副本 chown 给 root" "chown -R root:wheel ${T}/root/tgl-input-" "${T}/chown.log"
 _w=$(find "${T}/root/fork" -type f -perm -o+w 2>/dev/null | wc -l | tr -d ' ')
@@ -325,7 +683,7 @@ mk; to_p1
 cp "${H}/fixture-config.plist" "${T}/ESP/EFI/OC/config.plist"; reboot_sim
 run; chk "Windows 还原后照常运行：拒绝 P2" "$([ $? -ne 0 ] && echo y)" y
 [ ! -f "${T}/accel" ] && ok "GPU 未被动过" || no "P2 被执行了"
-chk "阶段仍 p1-pass（只能回滚）" "$(stage_now)" p1-pass
+chk "历史P1不可继续，保留失败证据" "$(stage_now)" p1-failed
 has "提示执行 --rollback" '--rollback' "${T}/out.txt"
 run --rollback; chk "--rollback 收尾成功" "$?" 0
 chk "config 是改前版本" "$(cfgsha)" "${ORIG_SHA}"
@@ -360,6 +718,9 @@ cp "${T}/drill.txt" "${T}/vol/CLONEZILLA 1/RECOVERY-DRILL-OK.txt"
 cp -R "${FORK}" "${T}/vol/CLONEZILLA 1/kit/fork"
 env PATH="${B}:${PATH}" FAKE="${T}" FAKE_PY="${PYBIN}" HOME="${T}/home" IGPU_FIELD_ROOT="${T}/root" \
     IGPU_EXT_DIR="${T}/Extensions" IGPU_PANIC_DIR="${T}/panic" \
+    IGPU_BOOT_KC="${T}/collections/BootKernelExtensions.kc" \
+    IGPU_SYSTEM_KC="${T}/collections/SystemKernelExtensions.kc" \
+    IGPU_AUX_KC="${T}/collections/AuxiliaryKernelExtensions.kc" \
     sh "${T}/vol/CLONEZILLA 1/kit/fork/field/adl-s-field.sh" > "${T}/out.txt" 2>&1
 chk "从“CLONEZILLA 1”运行第 1 步成功" "$?" 0
 ls -d "${T}/vol/CLONEZILLA 1/igpu/results-adl-s-config-"* >/dev/null 2>&1 && ok "证据写进实际的 U 盘" || no "证据没写进 U 盘"
@@ -380,33 +741,32 @@ mk; run; reboot_sim; FAKE_KMUTIL_RC=1 run; chk "退出非 0" "$([ $? -ne 0 ] && 
 [ -z "$(ls "${T}/Extensions")" ] && ok "kext 已撤出" || no "kext 残留"
 chk "阶段 install-failed" "$(stage_now)" install-failed
 run --rollback; chk "失败后回滚 config 恢复" "$(cfgsha)" "${ORIG_SHA}"
-has "kmutil 失败后回滚仍重建 AuxKC" 'install' "${T}/kmutil.log"
+has "失败后的回滚请求 Aux 重建" '^kmutil rebuild$' "${T}/kmutil.log"
 
-echo "== 7 P1：等批准与失败 =="
-mk; run; reboot_sim; run; reboot_sim; FAKE_RT_UNLOADED=1 run; chk "只是没加载：退出 0" "$?" 0
+echo "== 7 P1：真实27等待，与未确认缺模块分开 =="
+mk; run; reboot_sim; FAKE_KMUTIL_LOAD_RC=27 run; chk "实际27：等待退出0" "$?" 0
 chk "阶段 awaiting-approval" "$(stage_now)" awaiting-approval
 has "提示去系统设置批准" '隐私与安全性' "${T}/out.txt"
-has "summary 记 AWAITING" 'P1=AWAITING-APPROVAL' "$(ev p1 summary.txt)"
-has "等批准也留 kernelmanagerd 证据" 'log show --last boot' "${T}/log-args.txt"
-FAKE_RT_UNLOADED=1 run; chk "没重启就重跑：退出 3" "$?" 3
+has "summary 保留27" 'kmutil_load_rc=27' "$(ev install summary.txt)"
+run; chk "没重启就重跑：退出3" "$?" 3
 chk "阶段不变" "$(stage_now)" awaiting-approval
-env PATH="${B}:${PATH}" FAKE="${T}" FAKE_UID=0 IGPU_FIELD_ROOT="${T}/root" sh "${FORK}/field/adl-s-field.sh" --status > "${T}/st.txt" 2>&1
-has "--status 指引批准" '点“允许”' "${T}/st.txt"
-reboot_sim; FAKE_RT_UNLOADED=1 run; chk "批准重启后仍没加载：退出非 0" "$([ $? -ne 0 ] && echo y)" y
-chk "只给一次机会：p1-failed" "$(stage_now)" p1-failed
-has "说明是批准后仍未加载" '批准并重启后' "${T}/out.txt"
-run; chk "失败终态不自动重试" "$?" 1
-mk; run; reboot_sim; run; reboot_sim; FAKE_RT_UNLOADED=1 run
-reboot_sim; run; chk "批准后加载：退出 0" "$?" 0
+run --status; has "status 指向实际提示" '实际系统批准' "${T}/out.txt"
+reboot_sim; FAKE_RT_UNLOADED=1 run; chk "新Boot仍缺模块：停下" "$?" 1
+chk "不是已经批准：unresolved" "$(stage_now)" approval-unresolved
+has "说明审批/重建未知" '是否已批准/重建未知' "${T}/out.txt"
+run; chk "未确认终态不盲目重试" "$?" 1
+mk; run; reboot_sim; FAKE_KMUTIL_LOAD_RC=27 run
+: > "${T}/aux-next-present"
+reboot_sim; run; chk "批准重建后新Boot的P1通过" "$?" 0
 chk "阶段 p1-pass" "$(stage_now)" p1-pass
 run; chk "随后 P2 可跑" "$?" 0
 chk "阶段 p2-pass" "$(stage_now)" p2-pass
-mk; run; reboot_sim; run; reboot_sim; FAKE_RT_WRONG_UUID=1 run; chk "版本不对不算等批准" "$([ $? -ne 0 ] && echo y)" y
+mk; run; reboot_sim; run; reboot_sim; FAKE_RT_WRONG_UUID=1 run; chk "版本不对不算等待批准" "$?" 1
 chk "直接 p1-failed" "$(stage_now)" p1-failed
-mk; run; reboot_sim; run; reboot_sim; FAKE_RT_UNLOADED=1 FAKE_GFX_NODE=IGPU@2 run; chk "没加载且路径不符：不算等批准" "$([ $? -ne 0 ] && echo y)" y
+mk; run; reboot_sim; run; reboot_sim; FAKE_RT_UNLOADED=1 FAKE_GFX_NODE=IGPU@2 run; chk "缺模块且路径错：失败" "$?" 1
 chk "直接 p1-failed" "$(stage_now)" p1-failed
-mk; to_p1; FAKE_P2_SIGNAL=INT run; reboot_sim; FAKE_RT_UNLOADED=1 run; chk "P2 中断后复核时没加载：不进等批准" "$([ $? -ne 0 ] && echo y)" y
-chk "直接 p1-failed" "$(stage_now)" p1-failed
+mk; to_p1; FAKE_P2_SIGNAL=INT run; reboot_sim; FAKE_RT_UNLOADED=1 run; chk "中断后模块缺席：不猜批准" "$?" 1
+chk "阶段 unresolved" "$(stage_now)" approval-unresolved
 
 echo "== 7b GFX0 路径不符 =="
 mk; FAKE_GFX_NODE=IGPU@2 run; chk "第 1 步拒绝" "$([ $? -ne 0 ] && echo y)" y
@@ -525,7 +885,7 @@ mk; run; reboot_sim; FAKE_KMUTIL_SIGNAL=INT run; chk "安装时中断退出 130"
 [ -z "$(ls "${T}/Extensions")" ] && ok "kext 已撤出" || no "kext 残留"
 chk "阶段 install-failed" "$(stage_now)" install-failed
 run --rollback; chk "中断后回滚退出 0" "$?" 0
-has "kext 已撤时回滚仍重建 AuxKC" 'kmutil install' "${T}/kmutil.log"
+has "已撤安装源仍评估 AuxKC" '^kmutil rebuild$' "${T}/kmutil.log"
 chk "中断后回滚 config 恢复" "$(cfgsha)" "${ORIG_SHA}"
 mk; FAKE_MV_SIGNAL=config.plist run; chk "写 config 后中断退出 130" "$?" 130
 chk "阶段 config-interrupted" "$(stage_now)" config-interrupted
@@ -599,13 +959,22 @@ chk "拒绝时 config 未变" "$(cfgsha)" "${ORIG_SHA}"
 mk; run; reboot_sim; FAKE_DISK=disk4s1 FAKE_DECOY_ESP=1 FAKE_NO_BOOTPATH=1 run --rollback; chk "磁盘号变了且有同名卷，回滚仍成功" "$?" 0
 chk "config 恢复" "$(cfgsha)" "${ORIG_SHA}"
 has "回滚按 UUID 查询" "diskutil info ${ESP_UUID}" "${T}/diskutil.log"
+has "无 boot-path 时最终诚实标记 unverified" 'boot_source=unverified-no-bootpath' "$(ev rollback-final summary.txt)"
 
 echo "== 16 工作副本权限失败：不继续 =="
 mk; run; reboot_sim; FAKE_CHOWN_RC=1 run; chk "chown 失败退出非 0" "$([ $? -ne 0 ] && echo y)" y
 [ -z "$(ls "${T}/Extensions")" ] && ok "kext 未安装" || no "kext 被安装"
 
-echo "== 17 补丁控制流断言 =="
-if "${PYBIN}" "${REPO}/desktop-manual-20260917/fix/test_prepare_chain.py" > "${T:-/tmp}/chain.txt" 2>&1; then ok "probe 比较链：0x46808086 落到 SKU 2"; else no "probe 比较链断言失败" "$(tail -5 "${T}/chain.txt")"; fi
+echo "== 17 补丁控制流断言与解析器单元测试 =="
+if "${PYBIN}" -B "${REPO}/desktop-manual-20260917/fix/test_prepare_chain.py" > "${T:-/tmp}/chain.txt" 2>&1; then ok "probe 比较链：0x46808086 落到 SKU 2"; else no "probe 比较链断言失败" "$(tail -5 "${T}/chain.txt")"; fi
+if PYTHONDONTWRITEBYTECODE=1 "${PYBIN}" -B -m unittest discover -s "${H}" -p "test_*.py" > "${T:-/tmp}/unit.txt" 2>&1; then ok "field_check / boot-path 单元测试通过"; else no "单元测试失败" "$(tail -10 "${T}/unit.txt")"; fi
+
+LEGACY_ROLLBACK_AUTO=0
+auxkc_cases
+ownership_cases
+p1_evidence_cases
+status_evidence_cases
+review_regressions
 
 echo "== 18 中文邻接变量门禁 =="
 if "${PYBIN}" - "${SCRIPT}" <<'EOP'

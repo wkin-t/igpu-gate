@@ -1,84 +1,91 @@
-# field/ —— ADL-S 8086:4680 现场包（P1 开机隔离 + P2 只激活加速器）
+# ADL-S 现场包：P1 装载核验与 P2 加速器试验
 
-只适用于：Dell OptiPlex 7020 / UHD 770（`8086:4680` rev `0c`）/ macOS Tahoe `25G83` / U 盘上的 OpenCore（卷名 `OCEFI`，分区偏移 1048576）。
+仅限 Dell OptiPlex 7020、Intel UHD 770 `8086:4680` rev `0c`、Intel macOS Tahoe `25G83`。这是实验包，不是已证明兼容的图形驱动。
 
-## 一条命令
+## 用户只记一条命令
+
+复制到交换盘后的总入口：
 
 ```sh
-sudo sh field/adl-s-field.sh            # 每次都跑这一条，脚本自己判断该做哪一步
-sudo sh field/adl-s-field.sh --status   # 看进度（状态目录只有 root 可读，不带 sudo 也会自动提权）
-sudo sh field/adl-s-field.sh --rollback # 一键回到部署前（之后重启）
+sh /Volumes/CLONEZILLA/go.sh
 ```
 
-| 第几次 | 做什么 | 之后 |
-|---|---|---|
-| 1 | 预检（系统版本、真实设备 ID、GFX0 完整路径、恢复 EFI 已验证、TGL 原料结构断言、预编译件收据），备份并写入 OC 增量 | 重启 |
-| 2 | 确认 SIP 已放宽、`-allow3d` 已生效、GPU 已隔离（`device-id=ffff`）；工作副本收回写权限（root:wheel、go-w）；本机打补丁生成 TGL 运行时；放入 `/Library/Extensions` 并重建 AuxKC | 重启（如弹出“系统软件已被阻止”，先批准） |
-| 3 | **P1 判定**：两个 kext 已加载且 UUID 与本次构建一致，GPU 仍隔离，GFX0 完整路径等于 `gate.cpp` 的 `kPCIPath`，只有 1 个固件帧缓冲，没有加速器 | 保存工作 |
-| 3′ | 若**只是** kext 没加载、其余全部正常：进入 `awaiting-approval`，提示去“系统设置 → 隐私与安全性”点“允许”（上游部署文档同样有这一步） | 批准、重启，再跑同一条命令；仍未加载才判 `p1-failed` |
-| 4 | **P2**：`igpu-start --accel-only`，只等到加速器的 `start` 返回成功，不发布、不碰显示；判据见下节 | 带回证据 |
+卷名有空格时，用实际卷名并加引号。仓库直接入口如下：
 
-P2 若导致死机：重启后再跑同一条命令，脚本识别出"P2 期间重启"，只收集本次尝试时间之后的 panic 报告和日志，然后停下。运行时匹配规则只活在当次开机里，重启后自动回到 P1 状态。
+```sh
+sudo sh field/adl-s-field.sh
+sudo sh field/adl-s-field.sh --status
+sudo sh field/adl-s-field.sh --rollback
+```
 
-Ctrl-C、关终端、进程被杀**不算崩溃**：阶段记为 `p2-interrupted`，这次开机里不许重试（GPU 可能已开始初始化），重启后再跑会先复核 P1。
+每次只推进一个阶段，不自动重启、不自动批准、不自动重试 P2。密码输入不可见是正常行为。失败证据会自动留下；暂存或集合状态未知时，不会为了“继续”而提前恢复 SIP 或删除备份。
 
-## P2 判据：通过了说明什么
+## 2026-11-09 真机故障与修复范围
 
-**`P2=PASS` 只说明 `IntelAccelerator` 的 `start` 返回成功，且日志没有失败行。它不证明 GPU 能工作**：GuC、固件、命令提交都没有被验证。
+配置步骤已在真机完成；TGL 原料通过结构检查并生成了本地签名运行时。随后旧版 `kmutil install --update-all` 因没有匹配 KDK 而失败，两份安装源移出。后续同一条宽范围重建命令也失败。该事件不证明 staging、缓存或内存里完全没有残留。
 
-| 记录项（`summary.txt`） | 含义 |
-|---|---|
-| `found_device_id` / `found_revision` | `probe` 日志 `Found device with ID` 读到的真实身份，必须是 `0x46808086` / `0xc` |
-| `patch_effective` | `HWCAPS - GPU Sku: 2` 且 `L3BankCount: 4`。这两个值是 P-0002/P-0003 改出来的，**只算补丁生效，不算硬件验证** |
-| `hw_topology` | EU 32、1 slice、4 subslice，来自熔丝，才是硬件事实 |
-| `igpu_lines` / `igpu_guc` / `igpu_firmware` / `igpu_fail` / `igpu_warn` | 全部 `[IGPU]` 行按 GuC / 固件 / 失败分类的计数，全量在 `igpu-classified.txt`，一行可带多个标签。`fail`（fail、error、panic、timeout、hang 等）大于 0 记 `P2=PARTIAL`；`warn`（disabled、invalid 等，在良性消息里也常见）只计数，不参与判定 |
-| `found_device_id` 的格式 | 补丁脚本断言 TGL 原料里正好有一条 `Found device with ID 0x%08x, revision 0x%x,` 格式串，和解析器一致 |
-| `firmware_version` | 见到 `Graphics Firmware Version` 就记版本，否则 `not-seen`（只是记录，不是判据） |
-| `p2_outcome` | 见下表 |
+新版不再使用 `install/create --update-all`，不手工写 Boot/System/AuxKC，不使用 `-L`、`-z` 或 `--allow-missing-kdk` 来消除错误。安装通过标准 kernelmanagerd 协议请求，撤出通过标准 `kmutil rebuild` 请求。
 
-| `p2_outcome` | 判定依据（session 的 `failure.json` 优先，其次 IOService 状态 + 日志） | 结论 |
-|---|---|---|
-| `preflight-failed` | `failure.json` 的 stage 是 preflight | 预检没过，GPU 未动 |
-| `probe-failed` | 没有 `IntelAccelerator` 实例，日志没有 `Found device` 或有 `Failing probe`/`Failed to map` | `probe` 拒绝，或匹配没运行 |
-| `start-failed` | 没有实例，但见过 `Found device` 且 `probe` 没拒绝 | `start` 返回了失败，实例被摘除 |
-| `start-stuck` | 有实例，但 PCI 仍忙 | `start` 没有返回 |
-| `start-returned` | 有实例、PCI 空闲、未发布 | `start` 返回成功 |
+主源为 [Apple 安装指南](https://developer.apple.com/documentation/apple-silicon/installing-a-custom-kernel-extension.md) 与 [kmutil(8) 手册镜像](https://keith.github.io/xcode-man-pages/kmutil.8.html)。Apple 要求多个 kext 在同一次装载调用中传入，并明确用户批准、AuxKC 构建与重启是独立步骤。
 
-完整流程（不带 `--accel-only`）在 ADL-S 上一律拒绝：`session.py` 读探针的真实 `PhysicalDeviceID`，非 `0x46a3` 就在任何显示操作前停下；`gate.cpp` 的 `PrepareDisplay`/`CommitDisplay` 也返回 unsupported。显示代码（DesktopLink、原生帧缓冲）目前还是 ADL-P 专用。
+**不能保证** 25G83 的正常 daemon 路径完全免 KDK：本次离线采样证实了命令/格式，不是该机的新装载结果。若标准请求仍失败，会保存原码与输出，不改用更宽的重建或跳过安全检查。
 
-## 前置
+## 阶段含义
 
-- **门 G4（机器验证）**：在 Windows 里跑过恢复演练，U 盘根目录有 `RECOVERY-DRILL-OK.txt`，且其中 `live_sha` 等于第 1 步将要修改的 config 哈希；否则第 1 步拒绝。另需 `~/RECOVERY-EFI-VERIFIED.txt`（由 U 盘上的 `go.sh` 在见到演练凭证后自动写入）。
-- 交换盘根目录按脚本所在位置往上找含 `igpu-tgl-input/` 的目录，不写死 `/Volumes/CLONEZILLA`（卷名可能变成 `CLONEZILLA 1`）。交换盘没挂上时证据落到 `/var/igpu-adl-s/evidence`，不会在系统盘上造出假的挂载目录。
-- P2 开跑前再核对一次部署状态（csr、`-allow3d`、隔离、非安全模式），不符就拒绝并提示 `--rollback`：防止在 Windows 里还原过 config 后照常运行把 P2 跑在未隔离的 GPU 上。
-- 回滚接受“本工具增量 + Windows 恢复工具加的 `-x`”这一已知变体（`oc_delta.py verify --tolerate-safe-boot`），安全模式下一次 `--rollback` 即可撤 kext 并还原 config。
-- 恢复 EFI 已人工验证：`echo ok > ~/RECOVERY-EFI-VERIFIED.txt`（门 G4，否则第 1 步拒绝）。
-- 本地合法取得的 `AppleIntelTGLGraphics.kext`（16.0.0），默认放在 `/Volumes/CLONEZILLA/igpu-tgl-input/`，可用 `IGPU_TGL_INPUT` 覆盖。仓库不包含、也不分发它。
-- `prebuilt/`：CI 产物 `adl-s-prebuilt`（ManualActivation kext、control、收据），放在仓库根下。
+1. `start`：核对系统版本与目标卷 UUID、物理身份、GFX0 完整路径、恢复凭证、原料与预编译收据；备份并写入 OC 增量。随后重启。
+2. `config-applied`：在替换工作树或生成运行时前先确认无旧脏标记、无目标目录/残留链接；核对当前版本、系统卷、SIP、隔离和组件旧状态；在 root 专属副本生成运行时与不可变完整包装收据（覆盖可执行文件、`Info.plist` 与精确文件集合），写入复制标记后将两包复制到扩展目录并请求装载：
 
-## OC 增量（`oc_delta.py`，除此之外不改任何键）
+   ```sh
+   kmutil load --load-style start-only -p /Library/Extensions/ReimsTGLBoot.kext -p /Library/Extensions/ReimsADLManualActivation.kext
+   ```
 
-- `DeviceProperties/Add/PciRoot(0x0)/Pci(0x2,0x0)/device-id = FFFF0000`
-- `Kernel/Block`：`com.apple.driver.AppleIntelTGLGraphics`、`lab.reims.ReimsADLDesktopLink`（Exclude，Darwin 25）。**这两条可能无效**：OC 的 Block 只作用于它处理的 Boot KC，而 TGL 在 System KC、我们的运行时在 AuxKC，都够不到。真正挡住自动匹配的是开机隔离（`device-id=FFFF`）和运行时 kext 里被清空的 `IOKitPersonalities`，不要依赖 Block。
-- `csr-active-config = 03000000`（`CSR_ALLOW_UNTRUSTED_KEXTS | CSR_ALLOW_UNRESTRICTED_FS`）。它不含 `0x200`（`CSR_ALLOW_UNAPPROVED_KEXTS`），所以新装的 kext 要在“系统设置 → 隐私与安全性”里批准一次。这和上游 `docs/DEPLOY-SAME-HARDWARE.md` 的流程一致，现场脚本把它当作正常步骤（`awaiting-approval`），不判失败。本机上 ad-hoc 签名的 kext 是否出现“允许”按钮**未经真机验证**；批准并重启后仍未加载才判 `p1-failed`，并留下 `kmutil inspect --show-aux` 和 kernelmanagerd/syspolicyd 日志。
-- `boot-args` 加 `-allow3d`：TGL 加速器对非仿真设备 ID 不带此参数会直接拒绝 probe
+   `start-only` 不重播 GPU personalities，但不等于“完全不执行任何内核启动代码”。运行时的自动 personalities 被清空；必须保留产物身份检查。
+3. 原码 `27`：`awaiting-approval`，保留包和事务。去“系统设置 → 隐私与安全性”处理实际提示，使用提示里的“重新启动”。没有提示不要盲重启。
+4. 原码 `0/28`：请求已处理/需要重启，不宣称 AuxKC 已采用；随后做 P1。未知码则撤本事务安装源并保持失败记录。
+5. P1：验证本次组件的精确 ID/UUID、有效隔离、当前启动条件、Boot/System 集合指纹未变与控制器只读服务。不把“缺少模块”自动解释成已经批准或只差重启。
+6. P2：只在本次开机的 P1 有效且所有前置查询均成功退出时请求加速器初始化。新开机先重新核验 P1，不复用历史进度直接跑 P2。
 
-**这些改动对经这个 OC 启动的所有系统都生效，Sonoma 也一样（已确认接受）**：Sonoma 同样 SIP 放宽、GPU 隔离成 `device-id=FFFF`，只能走固件帧缓冲。`Kernel/Block` 限定 Darwin 25，但前两项不分系统。
+旧 `install-failed + KMUTIL_DIRTY` 或复制中断标记存在时，默认入口只进入受控恢复，不替换旧工作树、不生成新 runtime、不重新装载。历史 STAGE 不是当前硬件/政策状态证明。
 
-**WriteFlash**：样本配置 `NVRAM/WriteFlash=true`，`csr-active-config` 会写进主板 NVRAM。回滚只改了 ESP 上的 config，要**再经这个 OC 启动一次**才会把 NVRAM 写回 `00000000`；回滚后直接从别的启动项进系统，SIP 仍是放宽的。
+## 回滚是多边界事务
 
-## 失败与回滚
+- 若存在原安装 Boot/System 集合基线，回滚全流程与最终重启均对齐该不可变基线，不重采样洗白变化；旧遗留现场无原安装基线时明确记为 `original_system_baseline=unverified-legacy`。
+- 先按完整收据核对安装源归属（可执行文件、`Info.plist` 元数据及包内文件集），逐包移出到本地备份，不删除。陌生同名包、改过包装的包或撤出失败必须停止恢复配置。
+- 前台运行 `kmutil rebuild`，确认问题可见，原始退出码独立保存，不拿 `tee` 的退出码代替。
+- `27` 为 `rollback-awaiting-approval`；`0/28` 为 `rollback-pending-reboot`。同一 Boot 重跑只提示，不重复请求。config、BACKUP、DIRTY 保留。
+- 新的 Tahoe Boot 里，验证安装源不再出现、AuxKC 可用组件、未过滤内存清单、指定磁盘 AuxKC 均排除两份目标的任何版本，Boot/System 集合指纹未变化。任一查询失败、未知格式、旧版本残留或目标卷改变都是 incomplete。
+- 排除证据成立后才还原基线 config，进入 `rollback-final-reboot`。再经同一 OC 启动，验证 NVRAM、实际设备/实例、当前 config 哈希、Boot/System 指纹、AuxKC/内存排除和启动来源（若 NVRAM 含 `boot-path` 必须与记录 ESP 一致；基线 `ExposeSensitiveData=6` 未发布 `boot-path` 时诚实记为 `boot_source=unverified-no-bootpath`，不静默修改 `ExposeSensitiveData`）后，才标记回滚完成并清恢复记录。
 
-- 每一步失败都只停在当前阶段，保留证据目录（默认 `/Volumes/CLONEZILLA/igpu/results-adl-s-*`），失败终态不自动重试。收到 Ctrl-C/TERM/HUP 时，脚本按当前步骤收尾（撤 kext、删暂存文件、卸载 ESP）后以 130 退出。
-- `--rollback` 的顺序：**先撤 kext**（从 `/Library/Extensions` **移到** `/var/igpu-adl-s/removed-*`，不删除）并重建 AuxKC，**再还原 config**。原因：先还原 config 的话，SIP 恢复全开后 AuxKC 里的未签名 kext 可能卡开机。
-- 回滚的每一步失败都**继续做后面的步骤**，最后阶段记为 `rollback-incomplete`、退出 1、备份指针保留，可以再跑一次。
-- 还原前核对 config 哈希：现网既不是改前版本也不是本工具写入的版本（有人动过）时拒绝覆盖，把现网副本存进证据目录，记 `rollback-incomplete`。ESP 备份不可用时改用 `/var/igpu-adl-s/config-backups/` 的本地备份（同样校验哈希）。
-- ESP 按**分区 UUID** 定位（`Disk / Partition UUID`）：第 1 步先试 OC 暴露的本次启动分区（`boot-path`，**仅当 `Misc/Security/ExposeSensitiveData` 含 `0x01` 时才有**；样本配置是默认值 6，不含，所以实际会走下一条），取不到就要求卷名 `OCEFI` 唯一。用到的来源记在 `summary.txt` 的 `esp_source`。UUID 记下后，回滚只认它，磁盘号变化、出现同名卷都不影响。ESP 上的 `igpu-fork-backup-*` 永不删除。
-- 回滚时如果 kext 没撤干净或 AuxKC 重建失败，**不还原 config**（SIP 保持放宽），以免出现"SIP 全开 + AuxKC 里还有未签名 kext"这种可能卡开机的组合；修好后再跑一次 `--rollback`。
-- 辅助脚本（`field_check.py`、`oc_delta.py`）先复制到 root 专属的 `/var/igpu-adl-s/tools-*` 再执行，因为交换盘是 FAT32，任何人都能改。
+不全局清 StagedExtensions/KextPolicy。标准 rebuild 按已移走的安装源评估；在新启动、磁盘和内存排除成立前，不能把保留的 staging 副本说成已净化。历史缓存痕迹也不必物理删光；未决加入或无法分类时继续留证/停止。
 
-## 离线验证
+## 恢复边界
 
-`bash field/test/run-field.sh`：桩命令模拟 macOS，覆盖完整推进、未重启续跑、回滚（顺序、每步失败继续、`rollback-incomplete`、哈希核对、本地备份、UUID 定位）、设备/路径不符、G4 缺失、SIP 未生效（含旧值 `430a0000`）、kmutil 失败、P1/P2 失败、probe 失败与 start 卡住、`[IGPU]` 全量分类、P2 崩溃按时间过滤、Ctrl-C 与崩溃分开、各步骤 trap、`--status` 走 sudo、工作副本权限、probe 比较链断言、中文邻接变量门禁。CI 在 macos-26 的真 `sh` 与 bash 3.2 下跑。
+Windows 恢复演练只证明能找到 ESP、读写及使用一致的 config 备份。它**不证明**能进入 APFS Recovery 或撤掉 AuxKC。`-x` 只是试验性启动参数，不保证进入桌面或屏蔽 AuxKC 组件。
 
-**未执行**：以上都是仿真，没有一条在真机上跑过。`ioreg`、`diskutil`、`nvram`、`kmutil` 的输出格式来自桩，真机差异只有现场能暴露。
+Windows 仅回退 config，不等于清理 macOS 内的 kext；可能造成 SIP/隔离已回退而旧缓存仍可用。装载故障优先保持实验配置，按受控回滚处理。Recovery 的 panic-medic 涉及全部第三方组件，并非两包定向移除；需要独立确认范围和授权，不自动调用，也不凭空添加 Recovery 参数。
+
+## 配置与身份保持不变
+
+[OC 增量工具](<./oc_delta.py>) 仍只修改既定四类键：
+
+- GFX0 `device-id=FFFF0000`。
+- 两条 Kernel/Block（Darwin 25）。Block 可能够不到 System/AuxKC，不能当核心保护依赖。
+- `csr-active-config=03000000`，不额外放宽位。
+- boot-args 增加 `-allow3d`。
+
+SIP 和 DeviceProperties 隔离对经该 OC 启动的 Sonoma 也有效。`WriteFlash=true` 时，只改 config 不会立即恢复主板 NVRAM；需要再经此 OC 启动。恢复以真实 NVRAM 和设备状态核验为准。
+
+## P2 证据含义
+
+- `Found device with ID` 必须读到真实 `0x46808086` / `0xc`。
+- SKU 2/L3Bank 4 只说明 P-0002/P-0003 生效，不是硬件验证。
+- 32 EU、1 slice、4 subslice 是所记录的硬件拓扑。
+- 全部 `[IGPU]` 行按 GuC、firmware、fail/warn 保留；不会因失败而跳过采集。
+- 结果区分预检、probe、start 失败/卡住以及 start 返回成功。
+- `P2=PASS` 不证明 GuC/固件/命令提交/Metal 或显示接管可用。完整显示流程对 0x4680 仍拒绝。
+
+## 离线验证边界
+
+[现场仿真](<./test/run-field.sh>) 用四层独立状态桩、合成扩展和假 ESP 重放失败与恢复条件；[解析器测试](<./test/test_field_check.py>) 与 [启动路径测试](<./test/test_boot_path.py>) 覆盖精确身份、完整收据、未知数据、控制器服务、原生输出路径绑定及 UEFI `boot-path` 解析。
+
+CI 的只读命令样本来自 hosted ARM macOS runner，记录的是实际版本，不是 Intel 25G83 真机。它可以检验语法、命令存在性、格式和控制流；不能证明 Apple daemon 已在目标机成功装载、批准或采用 AuxKC，不能代替 Recovery/P1/P2 实测。
