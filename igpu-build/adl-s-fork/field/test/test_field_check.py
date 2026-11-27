@@ -274,6 +274,21 @@ class NativeInspectTests(unittest.TestCase):
         other = other.replace("com.apple.iokit.IOBufferCopyEngineFamily", TGL_ID)
         self.result(other + NATIVE_INSPECT.removeprefix("No variant specified, falling back to release\n"), "yes")
 
+    def test_empty_auxiliary_collection_with_or_without_extension_header_is_absent(self):
+        aux_path = "/Library/KernelCollections/AuxiliaryKernelExtensions.kc"
+        uuid_str = "BBBB0000-0000-0000-0000-000000000002"
+        for kind in ("auxiliary", "aux"):
+            empty_hdr = f"{kind} kernel collection at {aux_path} ({uuid_str}):\n"
+            for suffix in ("Extension Information:\n", ""):
+                with self.subTest(kind=kind, suffix=suffix):
+                    self.result("No variant specified, falling back to release\n" + empty_hdr + suffix,
+                                "yes", path=aux_path)
+                    self.result(NATIVE_INSPECT + empty_hdr + suffix, "yes", path=aux_path)
+                    self.result("No variant specified, falling back to release\n" + empty_hdr + suffix
+                                + NATIVE_INSPECT.removeprefix("No variant specified, falling back to release\n"),
+                                "yes", path=aux_path)
+            self.result(empty_hdr + "unexpected error line\n", "unknown", 1, path=aux_path)
+
 
 def gate_node(**overrides):
     node = {"IOObjectClass": "ReimsADLManualActivation",

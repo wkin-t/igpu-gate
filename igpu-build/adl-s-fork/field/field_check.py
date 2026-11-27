@@ -473,12 +473,14 @@ def inspect_identifiers(text):
 
 
 NATIVE_COLLECTION_HEADER = re.compile(
-    rf"(?P<kind>boot|system|auxiliary) kernel collection at (?P<path>/.+) \((?P<uuid>{UUID_PATTERN})\):"
+    rf"(?P<kind>boot|system|sys|auxiliary|aux) kernel collection at (?P<path>/.+) \((?P<uuid>{UUID_PATTERN})\):"
 )
 
 
 def native_inspect_identifiers(text, expected_path):
     # 使用真实 CI 的 Extension Information 表格格式；路径绑定由调用方显式提供。
+    # 空集合（0 扩展）可能只输出合法集合路径/UUID 头而不跟 Extension Information 子标题；
+    # 一旦有任何扩展行，仍必须先有 Extension Information 表头且逐行严格解析。
     # 解析本身不证明批准或 KC 已采用；shell 必须另外校验命令退出码、系统卷和新 boot。
     collections = {}
     current = None
@@ -495,8 +497,6 @@ def native_inspect_identifiers(text, expected_path):
             continue
         header = NATIVE_COLLECTION_HEADER.fullmatch(line)
         if header:
-            if current is not None and not information:
-                raise ValueError("inspect 缺完整的 Extension Information 表头")
             path = header["path"]
             if path in collections:
                 raise ValueError("inspect 集合路径重复")
@@ -525,7 +525,7 @@ def native_inspect_identifiers(text, expected_path):
                 raise ValueError("inspect 组件 UUID 无效")
             normalized_uuid(ext_uuid[1])
         collections[current].append(identifier)
-    if current is None or not information or expected_path not in collections:
+    if current is None or expected_path not in collections:
         raise ValueError("inspect 没有指定磁盘集合的完整信息")
     return collections[expected_path]
 

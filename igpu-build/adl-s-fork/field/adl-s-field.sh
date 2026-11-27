@@ -148,11 +148,17 @@ die() {
 
 open_evidence() {
   _base=${EVIDENCE_ROOT}
-  # 父目录不存在说明 U 盘没挂上：不能 mkdir -p，否则会在系统盘上造出假的 /Volumes/... 目录
-  if [ ! -d "$(dirname "${_base}")" ] || ! mkdir -p "${_base}" 2>/dev/null || [ ! -w "${_base}" ]; then _base="${ROOT}/evidence"; fi
-  mkdir -p "${_base}" || { printf '无法创建证据目录 %s\n' "${_base}" >&2; exit 1; }
   EV="${_base}/results-adl-s-$1-${TS}-$$"
-  mkdir -p "${EV}" || { printf '无法创建证据目录 %s\n' "${EV}" >&2; exit 1; }
+  # 父目录不存在说明 U 盘没挂上：不能 mkdir -p，否则会在系统盘上造出假的 /Volumes/... 目录；
+  # 已存在的 igpu 目录在只读/脏 FAT32 上 mkdir -p 仍可能返回 0，必须探测实际创建本次子目录与文件。
+  if [ ! -d "$(dirname "${_base}")" ] || ! mkdir -p "${EV}" 2>/dev/null \
+     || ! ( : > "${EV}/.probe" ) 2>/dev/null; then
+    _base="${ROOT}/evidence"
+    EV="${_base}/results-adl-s-$1-${TS}-$$"
+    mkdir -p "${EV}" && ( : > "${EV}/.probe" ) 2>/dev/null \
+      || { printf '无法创建证据目录 %s\n' "${EV}" >&2; exit 1; }
+  fi
+  rm -f "${EV}/.probe" 2>/dev/null
   summary "phase=$1"
   summary "started=${TS}"
   summary "stage_at_start=$(stage)"
@@ -352,9 +358,18 @@ unmount_esp() {
   fi
 }
 
-# 工作副本来自 FAT32 交换盘（所有人可写）。之后以 root 身份执行它，所以必须先收回写权限。
+# 工作副本来自 FAT32 交换盘（所有人可写或 diskarbitrationd 挂载为 0700）。之后以 root 身份执行它，先收回组和其他人写权限。
 secure_tree() {
   chown -R root:wheel "$1" && chmod -R go-w "$1"
+}
+
+# 安装进 /Library/Extensions 的 kext 须显式归一化为标准系统扩展权限（目录与可执行 0755、普通文件 0644）：
+# macOS 挂载 FAT32 U 盘常为 0700（drwx------），仅做 go-w 会导致非 root 桌面审批 UI 与系统服务无法读取 Info.plist。
+secure_kext_bundle() {
+  chown -R root:wheel "$1" \
+    && find "$1" -type d -exec chmod 755 {} + \
+    && find "$1" -type f -exec chmod 644 {} + \
+    && find "$1" -path '*/Contents/MacOS/*' -type f -exec chmod 755 {} +
 }
 
 # ---- 信号：Ctrl-C / 关终端 / kill ---------------------------------------------
@@ -670,7 +685,7 @@ do_install() {
     die "复制 kext 失败，撤出状态=${_cp_wk}"
   fi
   for _k in "${RUNTIME_NAME}" "${GATE_NAME}"; do
-    if ! secure_tree "${EXT_DIR}/${_k}"; then
+    if ! secure_kext_bundle "${EXT_DIR}/${_k}"; then
       _ch_wk=yes
       if ! withdraw_kexts chown-failed; then _ch_wk=no; fi
       : > "${KMUTIL_DIRTY}"

@@ -33,7 +33,7 @@ sudo sh field/adl-s-field.sh --rollback
 ## 阶段含义
 
 1. `start`：核对系统版本与目标卷 UUID、物理身份、GFX0 完整路径、恢复凭证、原料与预编译收据（校验脚本复制到 root 专属目录执行且禁用 `.pyc` 写入交换盘）；备份并写入 OC 增量。随后重启。
-2. `config-applied`：在替换工作树或生成运行时前先确认无旧脏标记、无目标目录/残留链接；核对当前版本、系统卷、SIP、隔离和组件旧状态；在清洗 AppleDouble/Finder 碎片后的 root 专属副本中复核预编译控制器收据、生成运行时与不可变完整包装收据（覆盖可执行文件、`Info.plist` 与精确文件集合），写入复制标记后将两包从 root 副本复制到扩展目录并请求装载：
+2. `config-applied`：在替换工作树或生成运行时前先确认无旧脏标记、无目标目录/残留链接；核对当前版本、系统卷、SIP、隔离和组件旧状态；在清洗 AppleDouble/Finder 碎片后的 root 专属副本中复核预编译控制器收据、生成运行时与不可变完整包装收据（覆盖可执行文件、`Info.plist` 与精确文件集合），写入复制标记后将两包从 root 副本复制到扩展目录并显式归一化为标准扩展权限（目录与可执行文件 `0755`、其余文件 `0644`，避免 FAT32 `0700` 挂载权限穿透）后请求装载：
 
    ```sh
    kmutil load --load-style start-only -p /Library/Extensions/ReimsTGLBoot.kext -p /Library/Extensions/ReimsADLManualActivation.kext

@@ -21,6 +21,8 @@ has() { if grep -q -- "$2" $3 2>/dev/null; then ok "$1"; else no "$1" "$3 里没
 lacks() { if grep -q -- "$2" $3 2>/dev/null; then no "$1" "$3 里不该有 [$2]"; else ok "$1"; fi; }
 PYBIN=$(command -v python3 2>/dev/null || command -v python)
 REAL_MV=$(command -v mv)
+REAL_CHMOD=$(command -v chmod)
+REAL_MKDIR=$(command -v mkdir)
 sha() { if command -v shasum >/dev/null 2>&1; then shasum -a 256 "$1" | awk '{print $1}'; else sha256sum "$1" | awk '{print $1}'; fi; }
 ESP_UUID=11111111-2222-4333-8444-555555555555
 SUITE_ROOT=$(mktemp -d 2>/dev/null || mktemp -d -t fieldsuite)
@@ -257,6 +259,10 @@ case "$1" in
     [ "$#" -eq 4 ] && [ "$2" = "--show-kext-uuids" ] && [ "$3" = "-A" ] || { echo "Unknown option '${2:-}'"; exit 64; }
     [ -f "$4" ] || { echo "No such file or directory: $4"; exit 66; }
     [ -n "${FAKE_DISK_AUX_RC:-}" ] && exit "${FAKE_DISK_AUX_RC}"
+    if [ -n "${FAKE_DISK_AUX_EMPTY_NO_EXTHDR:-}" ]; then
+      printf 'No variant specified, falling back to release\nauxiliary kernel collection at %s (BBBB0000-0000-0000-0000-000000000002):\n' "$4"
+      exit 0
+    fi
     printf 'No variant specified, falling back to release\nauxiliary kernel collection at %s (BBBB0000-0000-0000-0000-000000000002):\nExtension Information:\n' "$4"
     printf 'com.apple.driver.HighPointIOP\t1.0\t/Library/Extensions/HighPointIOP.kext\t(CCCC0000-0000-0000-0000-000000000009)\n'
     if [ -n "${FAKE_DISK_AUX_STALE:-}" ] || [ -f "${FAKE}/aux-next-present" ] \
@@ -334,6 +340,18 @@ if [ -n "\${FAKE_MV_SIGNAL:-}" ]; then
   case "\$*" in *"\${FAKE_MV_SIGNAL}"*) kill -INT "\${PPID}" ;; esac
 fi
 exit \${_rc}
+EOS
+  cat > "${B}/chmod" <<EOS
+#!/bin/sh
+[ -n "\${FAKE:-}" ] && echo "chmod \$*" >> "\${FAKE}/chmod.log"
+exec "${REAL_CHMOD}" "\$@"
+EOS
+  cat > "${B}/mkdir" <<EOS
+#!/bin/sh
+if [ -n "\${FAKE_EV_MKDIR_FAIL:-}" ]; then
+  case "\$*" in *"\${FAKE_EV_MKDIR_FAIL}"*) exit 1 ;; esac
+fi
+exec "${REAL_MKDIR}" "\$@"
 EOS
   printf '#!/bin/sh\nexit 0\n' > "${B}/csrutil"
   printf '#!/bin/sh\nexec "%s" "$@"\n' "${PYBIN}" > "${B}/python3"
@@ -625,7 +643,51 @@ review_regressions() {
   rm -rf "${FORK}/desktop-manual-20260917/fix/__pycache__"
   run; chk "第1步从root副本执行补丁预检通过" "$?" 0
   [ ! -e "${FORK}/desktop-manual-20260917/fix/__pycache__" ] && ok "交换盘未残留__pycache__" || no "交换盘残留了__pycache__"
+
+  round3_regressions
 }
+
+round3_regressions() {
+  # F14: FAT32 挂载为 0700 时，安装进 Extensions 的两份 kext 须显式归一化为目录/可执行 755、普通文件 644
+  mk; run; reboot_sim
+  "${REAL_CHMOD}" -R 700 "${FORK}/prebuilt/ReimsADLManualActivation.kext" "${T}/tgl/AppleIntelTGLGraphics.kext"
+  : > "${T}/chmod.log"
+  run; chk "FAT32 0700 源安装成功" "$?" 0
+  has "Extensions 目录归一化 755" "chmod 755 .*${EXT}/ReimsTGLBoot.kext" "${T}/chmod.log"
+  has "Extensions Info.plist 归一化 644" "chmod 644 .*${EXT}/ReimsTGLBoot.kext/Contents/Info.plist" "${T}/chmod.log"
+  has "Extensions 可执行文件归一化 755" "chmod 755 .*${EXT}/ReimsTGLBoot.kext/Contents/MacOS/AppleIntelTGLGraphics" "${T}/chmod.log"
+  has "Gate 目录归一化 755" "chmod 755 .*${EXT}/ReimsADLManualActivation.kext" "${T}/chmod.log"
+  has "Gate Info.plist 归一化 644" "chmod 644 .*${EXT}/ReimsADLManualActivation.kext/Contents/Info.plist" "${T}/chmod.log"
+  has "Gate 可执行文件归一化 755" "chmod 755 .*${EXT}/ReimsADLManualActivation.kext/Contents/MacOS/ReimsADLManualActivation" "${T}/chmod.log"
+  if [ "$(uname -s)" = "Darwin" ]; then
+    chk "Darwin 实测目录 mode=755" "$(/usr/bin/stat -f '%Lp' "${EXT}/ReimsTGLBoot.kext")" "755"
+    chk "Darwin 实测 Info.plist mode=644" "$(/usr/bin/stat -f '%Lp' "${EXT}/ReimsTGLBoot.kext/Contents/Info.plist")" "644"
+    chk "Darwin 实测可执行 mode=755" "$(/usr/bin/stat -f '%Lp' "${EXT}/ReimsTGLBoot.kext/Contents/MacOS/AppleIntelTGLGraphics")" "755"
+  fi
+
+  # F15: 磁盘存在 0 扩展空 AuxiliaryKernelExtensions.kc 且 inspect 未输出 Extension Information 子标题时，回滚闭环不死锁
+  mk; run; reboot_sim
+  printf 'install-failed\n' > "${T}/root/STAGE"
+  : > "${T}/root/KMUTIL_DIRTY"
+  FAKE_DISK_AUX_EMPTY_NO_EXTHDR=1 run --rollback; chk "空AuxKC文件场景rebuild发出" "$?" 0
+  reboot_sim; FAKE_DISK_AUX_EMPTY_NO_EXTHDR=1 run; chk "空AuxKC文件无Extension Information子标题仍允许还原config" "$?" 0
+  chk "空AuxKC文件场景进入rollback-final-reboot" "$(stage_now)" rollback-final-reboot
+  reboot_sim; FAKE_DISK_AUX_EMPTY_NO_EXTHDR=1 run; chk "空AuxKC文件最终基线通过" "$?" 0
+  FAKE_DISK_AUX_EMPTY_NO_EXTHDR=1 run --rollback; chk "空AuxKC文件干净基线重复rollback幂等通过" "$?" 0
+
+  # F16: 交换盘 igpu 目录已存在但无法创建新证据子目录（脏/只读 FAT32）时，open_evidence 自动回退至系统盘而非退出
+  mk
+  mkdir -p "${T}/ro-usb/igpu"
+  IGPU_EVIDENCE_ROOT="${T}/ro-usb/igpu" FAKE_EV_MKDIR_FAIL="${T}/ro-usb/igpu/results-adl-s-" run
+  chk "脏FAT32无法新建证据子目录时自动回退并成功执行" "$?" 0
+  ls -d "${T}"/root/evidence/results-adl-s-config-* >/dev/null 2>&1 && ok "脏FAT32回退证据落入系统盘" || no "脏FAT32回退证据未落地"
+}
+
+if [ "${1:-}" = "--round3-only" ]; then
+  round3_regressions
+  printf '第三轮反例通过 %s，失败 %s\n' "${P}" "${F}"
+  [ "${F}" -eq 0 ]; exit "$?"
+fi
 
 if [ "${1:-}" = "--review-only" ]; then
   review_regressions
