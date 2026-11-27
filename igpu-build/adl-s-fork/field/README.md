@@ -42,8 +42,8 @@ sudo sh field/adl-s-field.sh --rollback
    `start-only` 不重播 GPU personalities，但不等于“完全不执行任何内核启动代码”。运行时的自动 personalities 被清空；必须保留产物身份检查。
 3. 原码 `27`：`awaiting-approval`，保留包和事务。去“系统设置 → 隐私与安全性”处理实际提示，使用提示里的“重新启动”。没有提示不要盲重启。
 4. 原码 `0/28`：请求已处理/需要重启，不宣称 AuxKC 已采用；随后做 P1。未知码则撤本事务安装源并保持失败记录。
-5. P1：验证本次组件的精确 ID/UUID、有效隔离、当前启动条件、Boot/System 集合指纹未变与控制器只读服务。不把“缺少模块”自动解释成已经批准或只差重启。
-6. P2：只在本次开机的 P1 有效且所有前置查询均成功退出时请求加速器初始化。新开机先重新核验 P1，不复用历史进度直接跑 P2。
+5. P1：验证本次组件的精确 ID/UUID、有效隔离、当前启动条件（含 `kern.safeboot=0` 与非 `-x`）、Boot/System 集合指纹未变与控制器只读服务。不把“缺少模块”自动解释成已经批准或只差重启。
+6. P2：只在本次开机的 P1 有效且所有前置查询（含 `kern.safeboot=0`）均成功退出时请求加速器初始化。新开机先重新核验 P1，不复用历史进度直接跑 P2。
 
 旧 `install-failed + KMUTIL_DIRTY` 或复制中断标记存在时，默认入口只进入受控恢复，不替换旧工作树、不生成新 runtime、不重新装载。历史 STAGE 不是当前硬件/政策状态证明。
 
@@ -54,7 +54,7 @@ sudo sh field/adl-s-field.sh --rollback
 - 前台运行 `kmutil rebuild`，确认问题可见，原始退出码独立保存，不拿 `tee` 的退出码代替。
 - `27` 为 `rollback-awaiting-approval`；`0/28` 为 `rollback-pending-reboot`。同一 Boot 重跑只提示，不重复请求。config、BACKUP、DIRTY 保留。
 - 新的 Tahoe Boot 里，验证安装源不再出现、AuxKC 可用组件、未过滤内存清单、指定磁盘 AuxKC 均排除两份目标的任何版本，Boot/System 集合指纹未变化。任一查询失败、未知格式、旧版本残留或目标卷改变都是 incomplete。
-- 排除证据成立后才还原基线 config，进入 `rollback-final-reboot`。再经同一 OC 启动，验证 NVRAM、实际设备/实例、当前 config 哈希、Boot/System 指纹、AuxKC/内存排除和启动来源（若 NVRAM 含 `boot-path` 必须与记录 ESP 一致；基线 `ExposeSensitiveData=6` 未发布 `boot-path` 时诚实记为 `boot_source=unverified-no-bootpath`，不静默修改 `ExposeSensitiveData`）后，才标记回滚完成并清恢复记录。
+- 排除证据成立后才还原基线 config（若缺失备份记录则必须核实现网 ESP `delta=absent`，拒绝假称已还原），进入 `rollback-final-reboot`。再经同一 OC 启动，验证 NVRAM、`kern.safeboot=0`、实际设备/实例、当前 config 哈希、Boot/System 指纹、AuxKC/内存排除和启动来源（若 NVRAM 含 `boot-path` 必须与记录 ESP 一致；基线 `ExposeSensitiveData=6` 未发布 `boot-path` 时诚实记为 `boot_source=unverified-no-bootpath`，不静默修改 `ExposeSensitiveData`）后，才标记回滚完成并清恢复记录。幂等基线检查同样核对现网 ESP `delta=absent`。
 
 不全局清 StagedExtensions/KextPolicy。标准 rebuild 按已移走的安装源评估；在新启动、磁盘和内存排除成立前，不能把保留的 staging 副本说成已净化。历史缓存痕迹也不必物理删光；未决加入或无法分类时继续留证/停止。
 

@@ -8,6 +8,7 @@
 #       [IGPU] 全量分类、P2 崩溃按时间过滤证据、Ctrl-C 与崩溃分开、信号 trap、--status 实际观察、
 #       工作副本权限、csr 取值、补丁控制流断言、中文邻接变量门禁。
 set -u
+export PYTHONDONTWRITEBYTECODE=1
 H=$(cd "$(dirname "$0")" && pwd)
 FIELD=$(cd "${H}/.." && pwd)
 REPO=$(cd "${FIELD}/.." && pwd)
@@ -125,6 +126,7 @@ EOS
 #!/bin/sh
 case "$2" in
   kern.bootsessionuuid) cat "${FAKE}/bootid"; exit "${FAKE_BOOTID_RC:-0}" ;;
+  kern.safeboot) echo "${FAKE_SAFEBOOT:-0}"; exit "${FAKE_SAFEBOOT_RC:-0}" ;;
   kern.bootargs) if [ -f "${FAKE}/applied-on-boot" ] && [ -z "${FAKE_NO_ALLOW3D:-}" ]; then echo "-v -allow3d ${FAKE_BOOTARGS_EXTRA:-}"; else echo "-v"; fi; exit "${FAKE_BOOTARGS_QUERY_RC:-0}" ;;
 esac
 EOS
@@ -341,7 +343,7 @@ mk() {
 }
 
 run_once() {  # 单次公开入口，保持每 Boot / 每阶段的真实边界
-  env MSYS2_ARG_CONV_EXCL="${T}/collections/AuxiliaryKernelExtensions.kc" \
+  env PYTHONDONTWRITEBYTECODE=1 MSYS2_ARG_CONV_EXCL="${T}/collections/AuxiliaryKernelExtensions.kc" \
       PATH="${B}:${PATH}" FAKE="${T}" FAKE_PY="${PYBIN}" HOME="${T}/home" \
       IGPU_FORK_SRC="${FORK}" IGPU_FIELD_ROOT="${T}/root" IGPU_EXT_DIR="${T}/Extensions" \
       IGPU_TGL_INPUT="${T}/tgl/AppleIntelTGLGraphics.kext" IGPU_EVIDENCE_ROOT="${IGPU_EVIDENCE_ROOT:-${T}/evidence}" \
@@ -539,6 +541,40 @@ review_regressions() {
   FAKE_BOOTPATH_CORRUPT=1 run
   chk "损坏的boot-path：最终不清记录" "$?" 1
   [ -f "${T}/root/BACKUP" ] && ok "损坏boot-path保留备份" || no "损坏boot-path丢备份"
+
+  # F8: Tahoe Shift 安全模式（kern.safeboot=1 而 bootargs 无 -x）及查询失败均须阻断
+  mk; to_p1
+  FAKE_SAFEBOOT=1 run --status
+  has "safeboot=1时status报需要恢复" 'observed_state=recovery-needed' "${T}/out.txt"
+  lacks "safeboot=1时status不提示P2" '保存工作后再跑一次' "${T}/out.txt"
+  FAKE_SAFEBOOT=1 run; chk "safeboot=1拒绝进入P2" "$?" 1
+  [ ! -f "${T}/accel" ] && ok "safeboot=1不动GPU" || no "safeboot=1仍跑GPU"
+  FAKE_SAFEBOOT_RC=1 run --status
+  has "safeboot查询失败status报unverified" 'observed_state=unverified' "${T}/out.txt"
+  mk; to_p1; run --rollback; reboot_sim; run; reboot_sim
+  FAKE_SAFEBOOT=1 run; chk "最终阶段safeboot=1拒绝收尾" "$?" 1
+  [ -f "${T}/root/BACKUP" ] && ok "最终阶段safeboot=1保留备份" || no "最终阶段safeboot=1丢备份"
+
+  # F9: 无 BACKUP 指针但 ESP config 仍含试验增量，禁止宣称已在基线或假称已还原
+  mk
+  "${PYBIN}" "${FIELD}/oc_delta.py" apply --config "${ESP}/EFI/OC/config.plist" --out "${ESP}/EFI/OC/config.plist.applied" >/dev/null
+  mv "${ESP}/EFI/OC/config.plist.applied" "${ESP}/EFI/OC/config.plist"
+  run --rollback; chk "无BACKUP但ESP含增量：拒绝当成干净基线" "$?" 1
+  chk "无BACKUP但ESP含增量：标为rollback-incomplete" "$(stage_now)" rollback-incomplete
+  mk; run; reboot_sim
+  rm -f "${T}/root/BACKUP"
+  printf 'rollback-pending-reboot\n' > "${T}/root/STAGE"
+  printf 'rebuild\n' > "${T}/root/ROLLBACK_REQUEST"
+  : > "${T}/root/KMUTIL_DIRTY"
+  printf '%s\n%s\n' "$(sha "${T}/collections/BootKernelExtensions.kc")" "$(sha "${T}/collections/SystemKernelExtensions.kc")" > "${T}/root/ROLLBACK_SYSTEM_KCS"
+  run; chk "finish_rollback缺BACKUP而ESP含增量：拒绝假称已还原" "$?" 1
+  chk "finish_rollback缺BACKUP而ESP含增量：停在incomplete" "$(stage_now)" rollback-incomplete
+
+  # F10: p2-interrupted 下若 Windows 已回退 config，status 必须报 recovery-needed
+  mk; to_p1; FAKE_P2_SIGNAL=INT run
+  cp "${H}/fixture-config.plist" "${ESP}/EFI/OC/config.plist"; reboot_sim
+  run --status
+  has "p2-interrupted回退config后status报recovery-needed" 'observed_state=recovery-needed' "${T}/out.txt"
 }
 
 if [ "${1:-}" = "--review-only" ]; then

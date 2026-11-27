@@ -384,6 +384,15 @@ class BundleReceiptTests(unittest.TestCase):
             rc, out, _ = self._run_real("receipt", str(bundle), str(receipt_file), "--allow-partial")
             self.assertEqual((rc, out), (0, f"receipt=partial-ok uuid={UUID}"))
 
+            # Truncated XML plist prefix passes --allow-partial, but non-plist garbage fails closed
+            (bundle / "Contents/Info.plist").write_bytes(b'<?xml version="1.0"?><plist><dict><key>CF')
+            rc, out, _ = self._run_real("receipt", str(bundle), str(receipt_file), "--allow-partial")
+            self.assertEqual((rc, out), (0, f"receipt=partial-ok uuid={UUID}"))
+
+            (bundle / "Contents/Info.plist").write_bytes(b"FOREIGN_BINARY_GARBAGE_NOT_PLIST")
+            rc, _, _ = self._run_real("receipt", str(bundle), str(receipt_file), "--allow-partial")
+            self.assertNotEqual(rc, 0)
+
 
 class NvdataTests(unittest.TestCase):
     def test_valid_missing_and_corrupt_nvram_plist(self):

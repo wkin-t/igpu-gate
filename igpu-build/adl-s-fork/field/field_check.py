@@ -218,6 +218,15 @@ def _walk_bundle_regular_files(bundle):
     return files
 
 
+def _is_truncated_plist_prefix(raw):
+    stripped = raw.lstrip(b" \t\r\n")
+    for magic in (b"<?xml", b"<plist", b"bplist00"):
+        candidate = raw if magic == b"bplist00" else stripped
+        if candidate.startswith(magic) or magic.startswith(candidate):
+            return True
+    return False
+
+
 def cmd_receipt(args):
     bundle = pathlib.Path(args.bundle)
     try:
@@ -239,6 +248,8 @@ def cmd_receipt(args):
             try:
                 info = plistlib.loads(raw_info)
             except (ExpatError, ValueError, TypeError):
+                if not _is_truncated_plist_prefix(raw_info):
+                    fail("partial Info.plist is not a valid or truncated plist")
                 info = None
             if info is not None:
                 if not isinstance(info, dict):

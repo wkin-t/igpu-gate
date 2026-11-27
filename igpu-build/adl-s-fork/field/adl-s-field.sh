@@ -502,10 +502,10 @@ write_pointer() {  # write_pointer <备份目录名> <改前哈希> <改后哈�
 
 # ---- 第 2 步：SIP 生效后安装 kext -------------------------------------------
 owned_kext() {
-  # 拒绝符号链接；未完 copy 仍须满足已暂存收据的路径白名单与可读 Info.plist 身份，已完成复制校验完整收据。
+  # 拒绝符号链接；仅当复制事务标记仍在时允许核对部分副本，复制结束删除标记后一律校验完整收据。
   [ -L "${EXT_DIR}/$1" ] && return 1
   [ -n "${PY}" ] || return 1
-  if [ "${STEP}" = "install" ] || [ -f "${COPY_MARKER}" ]; then
+  if [ -f "${COPY_MARKER}" ]; then
     case "$1" in
       "${GATE_NAME}")
         [ -s "${INSTALLED_GATE_RECEIPT}" ] && "${PY}" "${TOOLS}/field_check.py" receipt \
@@ -598,6 +598,9 @@ do_install() {
     || die "解析 csr-active-config 失败"
   [ "$(kv "${_csr}" csr-active-config)" = "${CSR_RELAXED}" ] \
     || die "SIP 未按预期放宽：$(kv "${_csr}" csr-active-config)（配置没生效，kext 未安装）"
+  _safe=$(sysctl -n kern.safeboot 2>/dev/null) || die "读不到安全模式状态 kern.safeboot"
+  printf '%s\n' "${_safe}" > "${EV}/safeboot.txt"
+  [ "${_safe}" = "0" ] || die "当前处于安全模式（kern.safeboot=${_safe}），不安装试验 kext"
   _args=$(sysctl -n kern.bootargs 2>/dev/null) || die "读不到启动参数 kern.bootargs"
   printf '%s\n' "${_args}" > "${EV}/bootargs.txt"
   case " ${_args} " in *" -allow3d "*) : ;; *) die "boot-args 没有 -allow3d（配置没生效，kext 未安装）" ;; esac
@@ -745,6 +748,8 @@ do_p1() {
   capture nvram-csr-p1.plist nvram -x csr-active-config || { set_stage p1-failed; die "P1 的 SIP 查询失败"; }
   _p1_csr=$("${PY}" "${TOOLS}/field_check.py" nvdata "${EV}/nvram-csr-p1.plist" csr-active-config 2>>"${EV}/transcript.txt") \
     || { set_stage p1-failed; die "P1 的 SIP 数据解析失败"; }
+  _p1_safe=$(sysctl -n kern.safeboot 2>/dev/null) || { set_stage p1-failed; die "P1 安全模式状态查询失败"; }
+  printf '%s\n' "${_p1_safe}" > "${EV}/safeboot-p1.txt"
   _p1_args=$(sysctl -n kern.bootargs 2>/dev/null) || { set_stage p1-failed; die "P1 启动参数查询失败"; }
   printf '%s\n' "${_p1_args}" > "${EV}/bootargs-p1.txt"
   [ -s "${INSTALLED_KCS}" ] || { set_stage p1-failed; die "缺安装集合基线，旧事务证据未闭合，请 --rollback"; }
@@ -772,7 +777,11 @@ do_p1() {
   _load_why=""
   [ "$(kv "${_p1_csr}" csr-active-config)" = "${CSR_RELAXED}" ] || _why="${_why} SIP未按试验配置生效"
   case " ${_p1_args} " in *" -allow3d "*) : ;; *) _why="${_why} 缺-allow3d" ;; esac
-  case " ${_p1_args} " in *" -x "*) _why="${_why} 安全模式" ;; esac
+  if [ "${_p1_safe}" != "0" ]; then
+    _why="${_why} 安全模式"
+  else
+    case " ${_p1_args} " in *" -x "*) _why="${_why} 安全模式" ;; esac
+  fi
   if [ "${_gate}" = "yes" ]; then
     capture controller-p1.plist ioreg -r -c ReimsADLManualActivation -l -a || _why="${_why} 控制器查询失败"
     _p1_controller=$("${PY}" "${TOOLS}/field_check.py" controller "${EV}/controller-p1.plist" 2>&1)
@@ -861,6 +870,12 @@ do_p2() {
     _csr=$("${PY}" "${TOOLS}/field_check.py" nvdata "${EV}/nvram-csr-p2.plist" csr-active-config 2>>"${EV}/transcript.txt") \
       || { _pre="${_pre} SIP解析失败"; _csr=""; }
   fi
+  if _safe=$(sysctl -n kern.safeboot 2>/dev/null); then
+    printf '%s\n' "${_safe}" > "${EV}/safeboot-p2.txt"
+  else
+    _pre="${_pre} safeboot查询失败"
+    _safe=""
+  fi
   if _args=$(sysctl -n kern.bootargs 2>/dev/null); then
     printf '%s\n' "${_args}" > "${EV}/bootargs-p2.txt"
   else
@@ -875,7 +890,11 @@ do_p2() {
   fi
   [ "$(kv "${_csr}" csr-active-config)" = "${CSR_RELAXED}" ] || _pre="${_pre} SIP=$(kv "${_csr}" csr-active-config)"
   case " ${_args} " in *" -allow3d "*) : ;; *) _pre="${_pre} 缺-allow3d" ;; esac
-  case " ${_args} " in *" -x "*) _pre="${_pre} 安全模式" ;; esac
+  if [ -n "${_safe}" ] && [ "${_safe}" != "0" ]; then
+    _pre="${_pre} 安全模式"
+  else
+    case " ${_args} " in *" -x "*) _pre="${_pre} 安全模式" ;; esac
+  fi
   [ "$(kv "${_gfx}" device_id)" = "ffff0000" ] || _pre="${_pre} device-id=$(kv "${_gfx}" device_id)"
   if [ -n "${_pre}" ]; then
     summary "p2_precheck=${_pre}"
@@ -1004,7 +1023,16 @@ rollback_fail() {
 
 rollback_config() {  # 还原 config；失败只报告，不中止
   if [ ! -f "${BACKUP_POINTER}" ]; then
-    log "没有配置备份记录：配置未被本工具改过，跳过。"
+    if ! locate_esp; then rollback_fail "没有配置备份记录且找不到 ESP：${ESP_ERR}"; return 1; fi
+    _rc_st=$("${PY}" "${TOOLS}/oc_delta.py" status --config "${MOUNT_POINT}/EFI/OC/config.plist" 2>>"${EV}/transcript.txt") || {
+      rollback_fail "没有配置备份记录且现网 config 状态核验失败"
+      return 1
+    }
+    if [ "$(kv "${_rc_st}" delta)" != "absent" ]; then
+      rollback_fail "没有配置备份记录，但现网 config 仍含试验增量（$(kv "${_rc_st}" delta)），拒绝跳过还原"
+      return 1
+    fi
+    log "没有配置备份记录，且已核实现网 config 无试验增量，无需还原。"
     return 0
   fi
   _name=$(sed -n 1p "${BACKUP_POINTER}")
@@ -1063,6 +1091,7 @@ rollback_stop() {
 }
 
 already_at_clean_baseline() {
+  BASELINE_ESP_BAD=""
   [ "$(stage)" = "start" ] || return 1
   [ ! -f "${BACKUP_POINTER}" ] && [ ! -f "${KMUTIL_DIRTY}" ] && [ ! -f "${COPY_MARKER}" ] || return 1
   ! ext_present "${EXT_DIR}/${GATE_NAME}" && ! ext_present "${EXT_DIR}/${RUNTIME_NAME}" || return 1
@@ -1078,12 +1107,29 @@ already_at_clean_baseline() {
   capture baseline-csr.plist nvram -x csr-active-config || return 1
   _bc=$("${PY}" "${TOOLS}/field_check.py" nvdata "${EV}/baseline-csr.plist" csr-active-config 2>&1) || return 1
   [ "$(kv "${_bc}" csr-active-config)" = "00000000" ] || return 1
+  _bsafe=$(sysctl -n kern.safeboot 2>/dev/null) || return 1
+  [ "${_bsafe}" = "0" ] || return 1
   _bargs=$(sysctl -n kern.bootargs 2>/dev/null) || return 1
   case " ${_bargs} " in *" -allow3d "*|*" -x "*) return 1 ;; esac
   _bgfx=$(snapshot_gfx baseline-gfx.plist) || return 1
   [ "$(kv "${_bgfx}" device_id)" = "${EXPECT_DEVICE}" ] \
     && [ "$(kv "${_bgfx}" accelerator)" = "0" ] \
     && [ "$(kv "${_bgfx}" native_fb)" = "0" ] || return 1
+  if ! locate_esp; then
+    unmount_esp
+    BASELINE_ESP_BAD="无配置备份记录但找不到 ESP：${ESP_ERR}"
+    return 1
+  fi
+  _bdelta=$("${PY}" "${TOOLS}/oc_delta.py" status --config "${MOUNT_POINT}/EFI/OC/config.plist" 2>>"${EV}/transcript.txt") || {
+    unmount_esp
+    BASELINE_ESP_BAD="无配置备份记录但 ESP config 状态核验失败"
+    return 1
+  }
+  unmount_esp
+  if [ "$(kv "${_bdelta}" delta)" != "absent" ]; then
+    BASELINE_ESP_BAD="无配置备份记录但 ESP config 仍含试验增量（$(kv "${_bdelta}" delta)）"
+    return 1
+  fi
   return 0
 }
 
@@ -1115,10 +1161,11 @@ do_rollback() {
   check_kmutil_contract || rollback_stop "kmutil 契约检查失败，未发重建请求"
   if already_at_clean_baseline; then
     summary "result=already-at-baseline"
-    log "当前已在部署前基线，且集合/内存/磁盘均无试验组件残留，无需重复回滚。"
+    log "当前已在部署前基线，且集合/内存/磁盘/ESP 均无试验残留，无需重复回滚。"
     log "证据目录：${EV}"
     return 0
   fi
+  [ -z "${BASELINE_ESP_BAD:-}" ] || rollback_stop "${BASELINE_ESP_BAD}"
   if [ -f "${INSTALLED_KCS}" ]; then
     verify_system_kcs_file "${INSTALLED_KCS}" \
       || rollback_stop "Boot/System 系统集合与安装前基线不一致或无法读取，拒绝重采样洗白变化"
@@ -1235,6 +1282,8 @@ finish_rollback_baseline() {
   _fc=$("${PY}" "${TOOLS}/field_check.py" nvdata "${EV}/nvram-csr-final.plist" csr-active-config 2>>"${EV}/transcript.txt") \
     || rollback_stop "最终 SIP 数据解析失败"
   [ "$(kv "${_fc}" csr-active-config)" = "00000000" ] || rollback_stop "最终 SIP 尚未恢复基线"
+  _fs=$(sysctl -n kern.safeboot 2>/dev/null) || rollback_stop "最终安全模式状态查询失败"
+  [ "${_fs}" = "0" ] || rollback_stop "最终启动仍处于安全模式（kern.safeboot=${_fs}）"
   _fa=$(sysctl -n kern.bootargs 2>/dev/null) || rollback_stop "最终启动参数查询失败"
   case " ${_fa} " in *" -allow3d "*|*" -x "*) rollback_stop "最终启动参数仍有试验/安全模式标记" ;; esac
   _fg=$(snapshot_gfx gfx-final.plist) || rollback_stop "最终 GFX0 查询失败"
@@ -1282,10 +1331,11 @@ show_status() {
   printf 'persisted_stage=%s\n' "$(stage)"
   if [ -f "${BACKUP_POINTER}" ]; then printf 'backup=%s\n' "$(sed -n 1p "${BACKUP_POINTER}")"; fi
   case "$(stage)" in
-    p1-pass|p2-pass|installed|awaiting-approval)
+    p1-pass|p2-pass|p2-interrupted|installed|awaiting-approval)
       open_evidence status
       _ss_ok=yes
       _ss_build=$(sw_vers -buildVersion 2>/dev/null) || { _ss_ok=no; _ss_build=""; }
+      _ss_safe=$(sysctl -n kern.safeboot 2>/dev/null) || { _ss_ok=no; _ss_safe=""; }
       _ss_args=$(sysctl -n kern.bootargs 2>/dev/null) || { _ss_ok=no; _ss_args=""; }
       _ss_gfx=$(snapshot_gfx gfx-status.plist 2>/dev/null) || { _ss_ok=no; _ss_gfx=""; }
       _ss_csr=""
@@ -1300,6 +1350,7 @@ show_status() {
       if [ "${_ss_ok}" = "yes" ] && [ -n "${_ss_gfx}" ] && [ -n "$(kv "${_ss_csr}" csr-active-config)" ]; then
         _ss_state=experiment-config-active
         [ "${_ss_build}" = "${EXPECT_BUILD}" ] || _ss_state=recovery-needed
+        [ "${_ss_safe}" = "0" ] || _ss_state=recovery-needed
         [ "$(kv "${_ss_gfx}" device_id)" = "ffff0000" ] || _ss_state=recovery-needed
         [ "$(kv "${_ss_csr}" csr-active-config)" = "${CSR_RELAXED}" ] || _ss_state=recovery-needed
         case " ${_ss_args} " in *" -allow3d "*) : ;; *) _ss_state=recovery-needed ;; esac
